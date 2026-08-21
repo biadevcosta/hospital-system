@@ -1,0 +1,12 @@
+[submodule "history-service"]
+	path = history-service
+	url = https://github.com/biadevcosta/history-service.git
+[submodule "identity-service"]
+	path = identity-service
+	url = https://github.com/biadevcosta/identity-service.git
+[submodule "notification-service"]
+	path = notification-service
+	url = https://github.com/biadevcosta/notification-service.git
+[submodule "scheduling-service"]
+	path = scheduling-service
+	url = https://github.com/biadevcosta/scheduling-service.git
