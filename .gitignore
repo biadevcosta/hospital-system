@@ -1,0 +1,8 @@
+# Local RSA key pair (JWT RS256) — never commit the private key
+keys/private.pem
+
+# IDE / OS
+.idea/
+*.iml
+.DS_Store
+target/
