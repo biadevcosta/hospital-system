@@ -8,10 +8,160 @@ Sistema hospitalar · 4 serviços · Java 21 · Spring Boot 4.1 · Clean Archite
 
 - O **`scheduling-service` é a referência completa** — todas as camadas com código. Os outros três serviços **repetem a mesma estrutura** de Clean Architecture, então mostro deles apenas o **setup + o código distinto** (JWT RS256, listener Kafka, listener Rabbit + DLQ, cache, queries GraphQL). Onde disser "igual ao molde", copie o padrão do scheduling.
 - Pacote base usado nos exemplos: `com.biadevcosta.<servico>`. Ajuste ao seu.
-- Ordem sugerida de leitura/construção: **scheduling → notification → history → identity**.
+- **Ordem de leitura** (código de referência): **scheduling → notification → history → identity** — o scheduling é o único com todas as camadas escritas aqui; os outros repetem o molde.
+- **Ordem de construção e teste** (incremental, via Docker): **identity → scheduling → notification → history** — sem o identity no ar não há token real para exercitar os demais. Detalhes em ["Fluxo do sistema de ponta a ponta"](#fluxo-do-sistema-de-ponta-a-ponta), logo abaixo.
 - Portas: identity `8080`, scheduling `8081`, notification `8082`, history `8083`.
 
 > **Regra de ouro da Clean Architecture (use para revisar você mesma):** abra qualquer classe de `domain` ou `application` e olhe os `import`. Se aparecer `org.springframework`, `RestClient`, `RabbitTemplate`, `KafkaTemplate` ou qualquer classe concreta de infra, há vazamento. Todo colaborador externo de um caso de uso deve ser uma **interface (porta)** que você definiu no core — nunca uma classe concreta de fora. Exemplos de portas neste guia: `AppointmentRepository`, `ReminderPublisher`, `AppointmentEventPublisher`, `UserDirectory`, `PasswordHasher`, `TokenIssuer`, `HistoryRepository`, `ProcessedEventStore`.
+
+---
+
+# Fluxo do sistema de ponta a ponta
+
+Uma foto só do sistema antes de mergulhar no código: quem fala com quem, o que acontece
+em cada requisição, e as regras de negócio que precisam ser respeitadas.
+
+## Topologia — quem fala com quem
+
+```mermaid
+flowchart TB
+    C["Cliente<br/>Insomnia · GraphiQL · front-end"]
+
+    subgraph SYNC ["sincrono — HTTP (cliente → serviço)"]
+      C -->|"POST /auth/login (e-mail + senha)"| ID["identity :8080<br/>assina JWT RS256 (chave privada)<br/>identity_db"]
+      C -->|"scheduleAppointment / editAppointment<br/>GraphQL + Bearer JWT"| SC["scheduling :8081<br/>WRITE — fonte da verdade<br/>scheduling_db"]
+      C -->|"history / futureAppointments<br/>GraphQL + Bearer JWT"| HI["history :8083<br/>READ — CQRS, read model<br/>history_db"]
+    end
+
+    SC -->|"RabbitMQ — reminder.queue (so IDs)"| NO["notification :8082<br/>@RabbitListener · resolve contato · envia (log)"]
+    SC -->|"Kafka — appointment-events (key = patientId)"| HI
+
+    NO -->|"GET /users/{id} — HTTP + cache"| ID
+    HI -->|"GET /users/{id} — HTTP + cache"| ID
+    NO -->|"falhou 3x"| DLQ[("reminder.dlq")]
+```
+
+- **`identity` assina** o JWT com a chave **privada**; todos os outros **validam com a pública**
+  (`public.pem`). Ninguém chama o identity para validar token — só para buscar nome/e-mail.
+- **`scheduling` = write** (dono da tabela `appointments`); **`history` = read** (monta o próprio
+  read model a partir dos eventos). Nenhum serviço lê o banco de outro.
+- **Dois brokers, dois papéis:** RabbitMQ = tarefa (lembrete, com retry + DLQ);
+  Kafka = log de eventos (feed do histórico, ordenado por paciente, replayable, idempotente).
+
+## Caminho feliz — o que acontece em cada passo
+
+```
+(A) LOGIN
+    Cliente ──POST /auth/login { email, senha } ──► identity
+    identity: confere a senha (BCrypt), assina um JWT RS256 com a chave privada
+    ◄── { token }     claims: sub = userId, role, patientId? (so p/ paciente), exp
+
+(B) AGENDAR
+    Cliente ──mutation scheduleAppointment  +  Authorization: Bearer <token> ──► scheduling
+      1. valida o JWT com a chave PUBLICA         (nao chama o identity)
+      2. @PreAuthorize  → papel DOCTOR ou NURSE   (senao 403 FORBIDDEN)
+      3. regras de dominio: patientId/doctorId obrigatorios; scheduledAt no futuro
+      4. PERSISTE em scheduling_db                ◄── fonte da verdade, SEMPRE antes de publicar
+      5. publica lembrete  ──► RabbitMQ  reminder.queue      (AppointmentReminder, so IDs)
+      6. publica evento    ──► Kafka     appointment-events   (AppointmentCreated, key = patientId)
+    ◄── { id, status: SCHEDULED }
+
+    → NOTIFICATION consome o lembrete: @RabbitListener → GET /users/{id} no identity (cache)
+                   → "envia" (log). Falhou? retry 3x → cai na reminder.dlq
+    → HISTORY consome o evento: @KafkaListener idempotente (ignora eventId ja visto em
+              processed_events) → grava/atualiza o read model appointment_history
+
+(C) EDITAR
+    Cliente ──mutation editAppointment  +  Bearer <token> ──► scheduling
+      @PreAuthorize hasRole('DOCTOR')  +  regra "so o dono edita" NO DOMINIO
+      (Appointment.doctorId == userId do token). Persiste → publica AppointmentUpdated (Kafka).
+
+(D) CONSULTAR
+    Cliente ──query history / futureAppointments  +  Bearer <token> ──► history
+      @PreAuthorize  DOCTOR | NURSE | PATIENT
+      PATIENT      → ignora o patientId do argumento, usa o do TOKEN  (so ve o proprio)
+      DOCTOR/NURSE → pode consultar qualquer paciente
+      resolve patientName / doctorName no identity (cache) e devolve a lista
+```
+
+## Regras de negócio (autoritativas)
+
+### Quem pode o quê
+
+| Operação | DOCTOR | NURSE | PATIENT | Onde é aplicado |
+|---|:---:|:---:|:---:|---|
+| Agendar consulta (`scheduleAppointment`) | ✅ | ✅ | ❌ | `@PreAuthorize` no resolver |
+| Editar consulta (`editAppointment`) | ✅ **só o dono** | ❌ | ❌ | `@PreAuthorize` (papel) + `Appointment.edit()` (dono, no domínio) |
+| Ver histórico (`history`) | ✅ qualquer paciente | ✅ qualquer paciente | ✅ **só o próprio** | `@PreAuthorize` (papel) + caso de uso (`patientId` vem do token p/ PATIENT) |
+| Ver consultas futuras (`futureAppointments`) | ✅ qualquer paciente | ✅ qualquer paciente | ✅ **só o próprio** | idem |
+
+Três papéis: `DOCTOR`, `NURSE`, `PATIENT` (claim `role` no JWT).
+
+### Ciclo de vida da consulta
+
+```
+        criada
+          │
+          ▼
+     ┌─────────┐  editAppointment(status: "COMPLETED")   ┌───────────┐
+     │SCHEDULED├────────────────────────────────────────►│ COMPLETED │
+     └────┬────┘                                          └───────────┘
+          │        editAppointment(status: "CANCELLED")  ┌───────────┐
+          └───────────────────────────────────────────► │ CANCELLED │
+                                                          └───────────┘
+
+  "consulta futura" = status SCHEDULED  E  scheduledAt no futuro
+  "historico"       = TODAS as consultas do paciente, qualquer status
+```
+
+### Invariantes (rejeitadas com exceção de domínio)
+
+- `scheduledAt` **no futuro** — na criação **e** na edição.
+- `patientId` e `doctorId` obrigatórios.
+- `status` só aceita os valores do enum (`SCHEDULED`, `COMPLETED`, `CANCELLED`).
+- *(opcional)* sem overbooking: mesmo médico, mesmo horário.
+
+### Onde cada tipo de regra mora (Clean Architecture)
+
+| Tipo de regra | Mecanismo | Lugar |
+|---|---|---|
+| Porta grossa por papel | `@PreAuthorize("hasAnyRole(...)")` | adapter (resolver GraphQL / controller) |
+| Regra fina ("dono edita", "paciente só o seu") | identidade do chamador passada **como parâmetro** | dentro do caso de uso — **nunca** `SecurityContextHolder` no core |
+| Invariantes da entidade | exceção de domínio | `domain/Appointment` |
+| Ordem validar → persistir → publicar | sequência explícita | `application/usecase/*` |
+
+### Identidade e token (RS256, stateless)
+
+- Claims do JWT: `sub` (userId), `role`, `patientId` (só para paciente), `iss`, `aud`, `exp`, `iat`.
+- Para um caller `PATIENT`, o `patientId` das queries vem **sempre do token**, nunca do argumento
+  do cliente. Para `DOCTOR`/`NURSE`, o `patientId` do argumento é honrado.
+
+### Mensageria: dois brokers, dois papéis
+
+| Broker | Papel | Fluxo | Semântica |
+|---|---|---|---|
+| **RabbitMQ** `reminder.queue` (+ `reminder.dlq`) | Tarefa (lembrete) | scheduling → notification | 1 consumidor lógico, retry + DLQ |
+| **Kafka** `appointment-events` | Log de eventos (feed do histórico) | scheduling → history | ordenado por paciente (key = `patientId`), replayable, idempotente no consumidor (`eventId` + `processed_events`) |
+
+Regra de ouro em todo caso de uso de escrita: **validar → persistir → publicar**. Nada é
+publicado antes de a consulta estar salva no banco.
+
+## Ordem de construção e teste (incremental, via Docker)
+
+Cada passo termina com algo que dá para verificar sozinho — subindo containers e fazendo
+requisições reais (Insomnia / `curl` / GraphiQL).
+
+| # | O que sobe | Comando | Como validar naquele ponto |
+|---|---|---|---|
+| 0 | infra: MySQL, RabbitMQ, Kafka | `docker compose up -d` | UIs no ar: RabbitMQ em `:15672` (guest/guest), MySQL em `:3306`; os 3 bancos criados |
+| 1 | **identity** :8080 | `./mvnw spring-boot:run` | registra 1 médico + 1 paciente; `POST /auth/login` devolve `{ token }`; cola o token em jwt.io e confere `role` / `sub` / `patientId` |
+| 2 | **scheduling** :8081 | `./mvnw spring-boot:run` | `scheduleAppointment` com o token do médico → objeto com `status: SCHEDULED`; `SELECT * FROM scheduling_db.appointments`; mensagem visível na `reminder.queue` (UI do Rabbit) **e** no tópico `appointment-events` (`kafka-console-consumer --property print.key=true`) |
+| 3 | **notification** :8082 | `./mvnw spring-boot:run` | com ele no ar, agende outra consulta → log `"lembrete enviado para <e-mail>"` (nome/e-mail vindos do identity); pare o identity e agende de novo → após 3 tentativas a mensagem cai na `reminder.dlq` |
+| 4 | **history** :8083 | `./mvnw spring-boot:run` | `query history(patientId: "...")` com token do médico → devolve a consulta; com token do **paciente** e um `patientId` de outro → devolve **só as dele**; publique o mesmo `AppointmentEvent` 2× no tópico → o read model **não duplica** (idempotência) |
+| 5 | tudo junto | `docker compose up` (4 serviços + infra) | fluxo completo: login → agendar → ver lembrete no log do notification → `query history` retornando a consulta |
+
+> A ordem de **leitura** do guia continua `scheduling → …` (código de referência). A tabela
+> acima é a ordem de **construir e integrar**.
 
 ---
 
