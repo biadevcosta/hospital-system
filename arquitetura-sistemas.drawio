@@ -1,0 +1,143 @@
+<mxfile host="65bd71144e">
+    <diagram name="Página-1" id="u4xIykFSWkHJ1O7X0Jwk">
+        <mxGraphModel dx="2501" dy="335" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1050" pageHeight="1250" math="0" shadow="0">
+            <root>
+                <mxCell id="0"/>
+                <mxCell id="1" parent="0"/>
+                <mxCell id="client" value="Cliente (frontend / GraphiQL / Insomnia)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" parent="1" vertex="1">
+                    <mxGeometry x="10" y="30" width="280" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="G3fp73hsxZ0u5p4biOgB-1" value="scheduling-service&lt;div&gt;porta da aplicação: 8081&lt;/div&gt;&lt;div&gt;GRAPHQL (mutations de scheduleAppointment e editAppointment)&lt;/div&gt;&lt;div&gt;&lt;div&gt;&lt;br&gt;&lt;/div&gt;&lt;div&gt;&amp;nbsp; Persiste primeiro, publica depois (ScheduleAppointmentUseCase / EditAppointmentUseCase) —&lt;/div&gt;&lt;div&gt;&amp;nbsp; é o único ponto de saída de eventos de todo o sistema.&lt;/div&gt;&lt;/div&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;verticalAlign=top;align=left;spacingLeft=6;" parent="1" vertex="1">
+                    <mxGeometry x="220" y="140" width="480" height="150" as="geometry"/>
+                </mxCell>
+                <mxCell id="rabbitmq" value="RabbitMQ&lt;div&gt;exchange: appointment.reminders&lt;/div&gt;&lt;div&gt;routing key: appointment.reminder&lt;/div&gt;&lt;div&gt;fila: reminder.queue&lt;/div&gt;&lt;div&gt;msg: AppointmentReminderMessage (ids + scheduledAt)&lt;/div&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;verticalAlign=top;align=left;spacingLeft=6;" parent="1" vertex="1">
+                    <mxGeometry x="80" y="360" width="270" height="110" as="geometry"/>
+                </mxCell>
+                <mxCell id="kafka" value="Kafka&lt;div&gt;tópico: appointment-events&lt;/div&gt;&lt;div&gt;key = patientId&lt;/div&gt;&lt;div&gt;msg: AppointmentEventMessage&lt;/div&gt;&lt;div&gt;(AppointmentCreated / AppointmentUpdated)&lt;/div&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;verticalAlign=top;align=left;spacingLeft=6;" parent="1" vertex="1">
+                    <mxGeometry x="470" y="360" width="270" height="110" as="geometry"/>
+                </mxCell>
+                <mxCell id="G3fp73hsxZ0u5p4biOgB-4" value="&lt;div&gt;&amp;nbsp; Serviço: notification-service&lt;/div&gt;&lt;div&gt;&amp;nbsp; consumidor de mensagens (RabbitMQ)&lt;/div&gt;&lt;div&gt;&amp;nbsp; resolve nome/e-mail via identity e simula o&lt;/div&gt;&lt;div&gt;&amp;nbsp; envio do lembrete (log — Brevo fica pra depois)&lt;/div&gt;&lt;div&gt;&amp;nbsp; não guarda dados de negócio — só idempotência&lt;/div&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;verticalAlign=top;align=left;spacingLeft=6;" parent="1" vertex="1">
+                    <mxGeometry x="80" y="530" width="270" height="150" as="geometry"/>
+                </mxCell>
+                <mxCell id="G3fp73hsxZ0u5p4biOgB-2" value="&amp;nbsp; Serviço: history-service&lt;div&gt;&amp;nbsp; porta da aplicação: 8083&lt;/div&gt;&lt;div&gt;&amp;nbsp;GRAPHQL — expõe queries (history, futureAppointments), sem mutations.&lt;/div&gt;&lt;div&gt;&lt;div&gt;Consumidor:&amp;nbsp; via AppointmentEventListener (@KafkaListener, groupId = history), que monta o read model com idempotência (processed_events).&lt;/div&gt;&lt;/div&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;verticalAlign=top;align=left;spacingLeft=6;" parent="1" vertex="1">
+                    <mxGeometry x="470" y="530" width="320" height="170" as="geometry"/>
+                </mxCell>
+                <mxCell id="G3fp73hsxZ0u5p4biOgB-3" value="&lt;div&gt;&lt;div&gt;&amp;nbsp; Serviço: identity-service&lt;/div&gt;&lt;span style=&quot;background-color: transparent;&quot;&gt;&amp;nbsp; porta da aplicação: 8080&lt;/span&gt;&lt;/div&gt;&lt;div&gt;&amp;nbsp;REST + Swagger/OpenAPI (POST /auth/login, POST /users, GET /users/{id}).&lt;/div&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;verticalAlign=top;align=left;spacingLeft=6;" parent="1" vertex="1">
+                    <mxGeometry x="255" y="770" width="390" height="180" as="geometry"/>
+                </mxCell>
+                <mxCell id="legend" value="Obs.: scheduling, notification e history validam o JWT RS256 localmente com a chave pública compartilhada (public.pem) — não é uma chamada de rede ao identity." style="rounded=0;whiteSpace=wrap;html=1;dashed=1;fillColor=none;strokeColor=#999999;fontStyle=2;align=left;spacingLeft=6;fontColor=#666666;" parent="1" vertex="1">
+                    <mxGeometry x="255" y="970" width="390" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="e-client-scheduling" value="GraphQL (JWT)" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" parent="1" source="client" target="G3fp73hsxZ0u5p4biOgB-1" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e-client-identity" value="REST (login / registro)" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" parent="1" source="client" target="G3fp73hsxZ0u5p4biOgB-3" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="150" y="340"/>
+                            <mxPoint x="450" y="340"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e-scheduling-rabbit" value="publica" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#82b366;" parent="1" source="G3fp73hsxZ0u5p4biOgB-1" target="rabbitmq" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e-scheduling-kafka" value="publica" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#82b366;" parent="1" source="G3fp73hsxZ0u5p4biOgB-1" target="kafka" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e-rabbit-notification" value="consome" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#82b366;" parent="1" source="rabbitmq" target="G3fp73hsxZ0u5p4biOgB-4" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e-kafka-history" value="consome" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#82b366;" parent="1" source="kafka" target="G3fp73hsxZ0u5p4biOgB-2" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e-notification-identity" value="GET /users/{id}" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" parent="1" source="G3fp73hsxZ0u5p4biOgB-4" target="G3fp73hsxZ0u5p4biOgB-3" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e-history-identity" value="GET /users/{id}" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" parent="1" source="G3fp73hsxZ0u5p4biOgB-2" target="G3fp73hsxZ0u5p4biOgB-3" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="scheduling_db" value="scheduling_db (3306)&lt;div&gt;&lt;br&gt;&lt;/div&gt;&lt;div&gt;Tabela: appointments&lt;/div&gt;&lt;div&gt;(id, patient_id, doctor_id,&lt;/div&gt;&lt;div&gt;scheduled_at, status, created_at)&lt;/div&gt;" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#f8cecc;strokeColor=#b85450;verticalAlign=middle;" parent="1" vertex="1">
+                    <mxGeometry x="720" y="145" width="170" height="140" as="geometry"/>
+                </mxCell>
+                <mxCell id="e-scheduling-db" value="persiste" style="edgeStyle=none;html=1;endArrow=none;strokeColor=#999999;dashed=1;" parent="1" source="G3fp73hsxZ0u5p4biOgB-1" target="scheduling_db" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="notification_db" value="notification_db (3307)&lt;div&gt;&lt;br&gt;&lt;/div&gt;&lt;div&gt;Tabela: processed_reminders&lt;/div&gt;&lt;div&gt;(appointment_id, processed_at)&lt;/div&gt;" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#f8cecc;strokeColor=#b85450;verticalAlign=middle;" parent="1" vertex="1">
+                    <mxGeometry x="80" y="700" width="160" height="110" as="geometry"/>
+                </mxCell>
+                <mxCell id="e-notification-db" value="persiste" style="edgeStyle=none;html=1;endArrow=none;strokeColor=#999999;dashed=1;" parent="1" source="G3fp73hsxZ0u5p4biOgB-4" target="notification_db" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="history_db" value="history_db (3308)&lt;div&gt;&lt;br&gt;&lt;/div&gt;&lt;div&gt;Tabela: appointment_history&lt;/div&gt;&lt;div&gt;(appointment_id, patient_id,&lt;/div&gt;&lt;div&gt;doctor_id, scheduled_at, status)&lt;/div&gt;&lt;div&gt;&lt;br&gt;&lt;/div&gt;&lt;div&gt;Tabela: processed_events&lt;/div&gt;&lt;div&gt;(event_id, processed_at)&lt;/div&gt;" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#f8cecc;strokeColor=#b85450;verticalAlign=middle;" parent="1" vertex="1">
+                    <mxGeometry x="810" y="535" width="180" height="170" as="geometry"/>
+                </mxCell>
+                <mxCell id="e-history-db" value="persiste" style="edgeStyle=none;html=1;endArrow=none;strokeColor=#999999;dashed=1;" parent="1" source="G3fp73hsxZ0u5p4biOgB-2" target="history_db" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="identity_db" value="identity_db (3309)&lt;div&gt;&lt;br&gt;&lt;/div&gt;&lt;div&gt;Tabela: users&lt;/div&gt;&lt;div&gt;(email, password_hash, role,&lt;/div&gt;&lt;div&gt;full_name, crm, specialty...)&lt;/div&gt;&lt;div&gt;&lt;br&gt;&lt;/div&gt;&lt;div&gt;Tabela: refresh_tokens&lt;/div&gt;&lt;div&gt;(token_hash, user_id,&lt;/div&gt;&lt;div&gt;expires_at, revoked)&lt;/div&gt;" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#f8cecc;strokeColor=#b85450;verticalAlign=middle;" parent="1" vertex="1">
+                    <mxGeometry x="670" y="775" width="190" height="175" as="geometry"/>
+                </mxCell>
+                <mxCell id="e-identity-db" value="persiste" style="edgeStyle=none;html=1;endArrow=none;strokeColor=#999999;dashed=1;" parent="1" source="G3fp73hsxZ0u5p4biOgB-3" target="identity_db" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="brevo" value="LoggingEmailSender&lt;div&gt;&lt;br&gt;&lt;/div&gt;&lt;div&gt;loga &quot;Simulated e-mail sent...&quot;&lt;/div&gt;&lt;div&gt;em vez de chamar um provedor real&lt;/div&gt;&lt;div&gt;(Brevo = próxima etapa)&lt;/div&gt;" style="rounded=1;whiteSpace=wrap;html=1;dashed=1;fillColor=#f5f5f5;strokeColor=#666666;verticalAlign=top;align=left;spacingLeft=6;spacingTop=6;" parent="1" vertex="1">
+                    <mxGeometry x="-100" y="530" width="150" height="110" as="geometry"/>
+                </mxCell>
+                <mxCell id="e-notification-brevo" value="simula envio" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#d79b00;" parent="1" source="G3fp73hsxZ0u5p4biOgB-4" target="brevo" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+            </root>
+        </mxGraphModel>
+    </diagram>
+    <diagram name="Fluxo ponta a ponta" id="e2e-flow-page-01">
+        <mxGraphModel dx="1451" dy="335" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="900" pageHeight="1450" math="0" shadow="0">
+            <root>
+                <mxCell id="e2e-0"/>
+                <mxCell id="e2e-1" parent="e2e-0"/>
+                <mxCell id="step0" value="0. Pré-requisitos&lt;div&gt;&lt;br&gt;&lt;/div&gt;&lt;div&gt;• Docker Desktop aberto (docker ps responde)&lt;/div&gt;&lt;div&gt;• Insomnia instalado&lt;/div&gt;&lt;div&gt;• public.pem igual nos 4 serviços (identity assina o JWT, os outros só validam)&lt;/div&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;verticalAlign=top;align=left;spacingLeft=8;spacingTop=8;" parent="e2e-1" vertex="1">
+                    <mxGeometry x="170" y="90" width="560" height="110" as="geometry"/>
+                </mxCell>
+                <mxCell id="step1" value="1. Subir o sistema inteiro (um comando só)&lt;div&gt;&lt;br&gt;&lt;/div&gt;&lt;div&gt;cd hospital-system &amp;#160;(raiz do repo)&lt;/div&gt;&lt;div&gt;docker compose up --build -d&lt;/div&gt;&lt;div&gt;&lt;br&gt;&lt;/div&gt;&lt;div&gt;Sobe os 4 apps + 4 MySQL + RabbitMQ + Kafka (compartilhados) + kafka-ui + adminer, numa rede só, sem conflito de porta&lt;/div&gt;&lt;div&gt;&lt;br&gt;&lt;/div&gt;&lt;div&gt;identity :8080 · scheduling :8085 · notification :8082 · history :8083&lt;/div&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;verticalAlign=top;align=left;spacingLeft=8;spacingTop=8;" parent="e2e-1" vertex="1">
+                    <mxGeometry x="170" y="230" width="560" height="210" as="geometry"/>
+                </mxCell>
+                <mxCell id="step2" value="2. Criar usuários no identity e pegar um token&lt;div&gt;&lt;br&gt;&lt;/div&gt;&lt;div&gt;Swagger: http://localhost:8080/swagger-ui.html&lt;/div&gt;&lt;div&gt;&lt;br&gt;&lt;/div&gt;&lt;div&gt;POST /auth/login (admin) → POST /users (DOCTOR)&lt;/div&gt;&lt;div&gt;→ POST /users (PATIENT, com SEU e-mail real)&lt;/div&gt;&lt;div&gt;→ POST /auth/login (doctor) — guarde o accessToken&lt;/div&gt;&lt;div&gt;&lt;br&gt;&lt;/div&gt;&lt;div&gt;Admin semeado: admin@hospital.local / admin12345&lt;/div&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;verticalAlign=top;align=left;spacingLeft=8;spacingTop=8;" parent="e2e-1" vertex="1">
+                    <mxGeometry x="170" y="470" width="560" height="220" as="geometry"/>
+                </mxCell>
+                <mxCell id="step3" value="3. Agendar uma consulta&lt;div&gt;&lt;br&gt;&lt;/div&gt;&lt;div&gt;GraphiQL: http://localhost:8085/graphiql&lt;/div&gt;&lt;div&gt;Header: Authorization: Bearer &amp;lt;token DOCTOR&amp;gt;&lt;/div&gt;&lt;div&gt;&lt;br&gt;&lt;/div&gt;&lt;div&gt;mutation scheduleAppointment(patientId, doctorId, scheduledAt)&lt;/div&gt;&lt;div&gt;→ grava em scheduling_db + publica no RabbitMQ e no Kafka&lt;/div&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;verticalAlign=top;align=left;spacingLeft=8;spacingTop=8;" parent="e2e-1" vertex="1">
+                    <mxGeometry x="170" y="730" width="560" height="170" as="geometry"/>
+                </mxCell>
+                <mxCell id="step4a" value="4a. Conferir o e-mail (simulado)&lt;div&gt;&lt;br&gt;&lt;/div&gt;&lt;div&gt;RabbitMQ UI: http://localhost:15672&lt;/div&gt;&lt;div&gt;(guest / guest)&lt;/div&gt;&lt;div&gt;&lt;br&gt;&lt;/div&gt;&lt;div&gt;fila reminder.queue deve zerar (consumida)&lt;/div&gt;&lt;div&gt;→ docker logs notification-service&lt;/div&gt;&lt;div&gt;→ procure &quot;Simulated e-mail sent to...&quot;&lt;/div&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;verticalAlign=top;align=left;spacingLeft=8;spacingTop=8;" parent="e2e-1" vertex="1">
+                    <mxGeometry x="170" y="930" width="270" height="180" as="geometry"/>
+                </mxCell>
+                <mxCell id="step4b" value="4b. Conferir o histórico&lt;div&gt;&lt;br&gt;&lt;/div&gt;&lt;div&gt;Kafka UI: http://localhost:8084&lt;/div&gt;&lt;div&gt;tópico appointment-events, consumer group &quot;history&quot;&lt;/div&gt;&lt;div&gt;&lt;br&gt;&lt;/div&gt;&lt;div&gt;GraphiQL: http://localhost:8083/graphiql&lt;/div&gt;&lt;div&gt;query history(patientId)&lt;/div&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;verticalAlign=top;align=left;spacingLeft=8;spacingTop=8;" parent="e2e-1" vertex="1">
+                    <mxGeometry x="460" y="930" width="270" height="180" as="geometry"/>
+                </mxCell>
+                <mxCell id="step5" value="5. Conferir os bancos&lt;div&gt;&lt;br&gt;&lt;/div&gt;&lt;div&gt;Adminer (um só p/ os 4): http://localhost:8090&lt;/div&gt;&lt;div&gt;Servidor: mysql-identity / mysql-scheduling / mysql-notification / mysql-history&lt;/div&gt;&lt;div&gt;Usuário/senha: root / root&lt;/div&gt;&lt;div&gt;&lt;br&gt;&lt;/div&gt;&lt;div&gt;CLI: docker exec mysql-history mysql -uroot -proot history_db -e &quot;SELECT * FROM appointment_history;&quot;&lt;/div&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;verticalAlign=top;align=left;spacingLeft=8;spacingTop=8;" parent="e2e-1" vertex="1">
+                    <mxGeometry x="170" y="1140" width="560" height="200" as="geometry"/>
+                </mxCell>
+                <mxCell id="e-s0-s1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" parent="e2e-1" source="step0" target="step1" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e-s1-s2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" parent="e2e-1" source="step1" target="step2" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e-s2-s3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" parent="e2e-1" source="step2" target="step3" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e-s3-s4a" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" parent="e2e-1" source="step3" target="step4a" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e-s3-s4b" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" parent="e2e-1" source="step3" target="step4b" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e-s4a-s5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" parent="e2e-1" source="step4a" target="step5" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e-s4b-s5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" parent="e2e-1" source="step4b" target="step5" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+            </root>
+        </mxGraphModel>
+    </diagram>
+</mxfile>

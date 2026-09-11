@@ -1,4 +1,235 @@
+# Sobe o sistema inteiro (os 4 serviços + MySQL x4 + RabbitMQ + Kafka) em uma rede Docker só,
+# sem os conflitos de porta que aparecem se você tentar rodar os 4 docker-compose.yml de cada
+# submódulo ao mesmo tempo (RabbitMQ e Kafka duplicados, history-service colidindo com o
+# phpMyAdmin do scheduling na 8083).
+#
+# Uso:
+#   docker compose up --build -d
+#   docker compose logs -f identity scheduling notification history   # acompanhar o startup
+#   docker compose down          # para tudo
+#   docker compose down -v       # para tudo e apaga os volumes do MySQL (reset total)
+#
+# Mapa de portas no host:
+#   identity        :8080   scheduling      :8085 (container 8081)
+#   notification    :8082   history         :8083
+#   kafka-ui        :8084   adminer         :8090
+#   mysql-scheduling  :3306   mysql-notification :3307
+#   mysql-history     :3308   mysql-identity     :3309
+#   rabbitmq (amqp) :5672   rabbitmq (mgmt) :15672
+#   kafka (broker)  :9092
+#
+# O envio de e-mail do notification é simulado (log) — sem integração com provedor real ainda
+# (Brevo fica pra uma segunda etapa). "Chegou" = a linha aparece em notification_db.processed_reminders
+# e o log do container mostra "Simulated e-mail sent to ...".
+
 services:
+  # ===================== identity-service =====================
+  mysql-identity:
+    image: mysql:8
+    container_name: mysql-identity
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: identity_db
+    ports:
+      - "3309:3306"
+    volumes:
+      - mysql-identity-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  identity:
+    build: ./identity-service
+    container_name: identity-service
+    restart: unless-stopped
+    depends_on:
+      mysql-identity:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql-identity:3306/identity_db
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: root
+
+  # ===================== scheduling-service =====================
+  mysql-scheduling:
+    image: mysql:8
+    container_name: mysql-scheduling
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: scheduling_db
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql-scheduling-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # shared broker: also used by notification (reminders) and history (appointment-events)
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: rabbitmq
+    restart: unless-stopped
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+
+  # shared broker: also consumed by history
+  kafka:
+    image: apache/kafka:3.8.0
+    container_name: kafka
+    restart: unless-stopped
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      # two broker listeners: EXTERNAL for clients on the host (localhost:9092),
+      # INTERNAL for clients inside the compose network (kafka:19092)
+      KAFKA_LISTENERS: CONTROLLER://0.0.0.0:9093,EXTERNAL://0.0.0.0:9092,INTERNAL://0.0.0.0:19092
+      KAFKA_ADVERTISED_LISTENERS: EXTERNAL://localhost:9092,INTERNAL://kafka:19092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT,INTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+
+  scheduling:
+    build: ./scheduling-service
+    container_name: scheduling-service
+    restart: unless-stopped
+    depends_on:
+      mysql-scheduling:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    ports:
+      # host 8085 -> container 8081 (8081 on the host is taken by an unrelated project on this machine)
+      - "8085:8081"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql-scheduling:3306/scheduling_db
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: root
+      SPRING_RABBITMQ_HOST: rabbitmq
+      SPRING_RABBITMQ_PORT: "5672"
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+
+  # Web Kafka browser — topics, partitions, message key/value/headers
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8084:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:19092
+      DYNAMIC_CONFIG_ENABLED: "true"
+
+  # ===================== notification-service =====================
+  mysql-notification:
+    image: mysql:8
+    container_name: mysql-notification
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: notification_db
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql-notification-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  notification:
+    build: ./notification-service
+    container_name: notification-service
+    restart: unless-stopped
+    depends_on:
+      mysql-notification:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      identity:
+        condition: service_started
+    ports:
+      - "8082:8082"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql-notification:3306/notification_db
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: root
+      SPRING_RABBITMQ_HOST: rabbitmq
+      # same compose network now — reach identity by container name, not host.docker.internal
+      APP_IDENTITY_BASE_URL: http://identity:8080
+
+  # ===================== history-service =====================
+  mysql-history:
+    image: mysql:8
+    container_name: mysql-history
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: history_db
+    ports:
+      - "3308:3306"
+    volumes:
+      - mysql-history-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  history:
+    build: ./history-service
+    container_name: history-service
+    restart: unless-stopped
+    depends_on:
+      mysql-history:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      identity:
+        condition: service_started
+    ports:
+      - "8083:8083"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql-history:3306/history_db
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: root
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+      APP_IDENTITY_BASE_URL: http://identity:8080
+
+  # ===================== cross-cutting =====================
+  # One DB browser for all 4 MySQL containers — pick the server on the Adminer login page
+  # (mysql-identity / mysql-scheduling / mysql-notification / mysql-history), root/root.
   adminer-hospital:
     image: adminer
     container_name: adminer-hospital
@@ -6,6 +237,10 @@ services:
     ports:
       - "8090:8080"
     environment:
-      ADMINER_DEFAULT_SERVER: host.docker.internal
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      ADMINER_DEFAULT_SERVER: mysql-identity
+
+volumes:
+  mysql-identity-data:
+  mysql-scheduling-data:
+  mysql-notification-data:
+  mysql-history-data:

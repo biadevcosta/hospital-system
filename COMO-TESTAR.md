@@ -1,8 +1,8 @@
 # Como testar o sistema (passo a passo)
 
 Guia prático pra subir e exercitar os serviços via Docker + Insomnia + as UIs de banco e de fila.
-Cobre hoje **identity-service** e **scheduling-service**; `notification-service` e `history-service`
-entram nas seções 9–10 conforme forem testados.
+Cobre os **4 serviços** (identity, scheduling, notification, history) subindo juntos com **um único
+`docker compose up`** a partir da raiz do repo.
 
 > O `README.md` da raiz é o documento de arquitetura e regras. Este arquivo é só o roteiro de teste.
 
@@ -10,14 +10,22 @@ entram nas seções 9–10 conforme forem testados.
 
 ## Mapa rápido
 
-| Serviço | App | Doc da API | phpMyAdmin (root/root) | UI de fila |
-|---|---|---|---|---|
-| **identity-service** | http://localhost:8080 | Swagger: http://localhost:8080/swagger-ui.html · JSON: `/v3/api-docs` | http://localhost:8082 → `identity_db` | — |
-| **scheduling-service** | http://localhost:8085 (container 8081) | GraphiQL: http://localhost:8085/graphiql · SDL: `/graphql/schema` | http://localhost:8083 → `scheduling_db` | Kafka UI: http://localhost:8084 · RabbitMQ: http://localhost:15672 (guest/guest) |
+| Serviço | App | Doc da API |
+|---|---|---|
+| **identity-service** | http://localhost:8080 | Swagger: http://localhost:8080/swagger-ui.html · JSON: `/v3/api-docs` |
+| **scheduling-service** | http://localhost:8085 (container 8081) | GraphiQL: http://localhost:8085/graphiql · SDL: `/graphql/schema` |
+| **notification-service** | http://localhost:8082 | sem API própria — só consome RabbitMQ |
+| **history-service** | http://localhost:8083 | GraphiQL: http://localhost:8083/graphiql · SDL: `/graphql/schema` |
+
+| Infra compartilhada | URL |
+|---|---|
+| Adminer (um só painel pros 4 bancos) | http://localhost:8090 (servidor: `mysql-identity` / `mysql-scheduling` / `mysql-notification` / `mysql-history`, `root`/`root`) |
+| RabbitMQ management | http://localhost:15672 (`guest`/`guest`) |
+| Kafka UI | http://localhost:8084 |
 
 **Credenciais**
 - Admin semeado (identity): `admin@hospital.local` / `admin12345`
-- Doctor/Nurse: você cria no passo 4 (ex.: `doc@hospital.local` / `secret12345`).
+- Doctor/Nurse/Patient: você cria no passo 4 (ex.: `doc@hospital.local` / `secret12345`).
 
 **Collections Insomnia**
 - `identity-service/identity.insomnia.json`
@@ -30,46 +38,41 @@ entram nas seções 9–10 conforme forem testados.
 - **Docker Desktop** aberto e rodando (`docker ps` responde).
 - **Insomnia** instalado.
 - **Chaves RSA**: `identity-service/src/main/resources/private.pem` tem que existir, e o `public.pem`
-  precisa ser o mesmo par nos 3 serviços (identity assina o JWT, scheduling/history validam). Já está
+  precisa ser o mesmo par nos 4 serviços (identity assina o JWT, os outros só validam). Já está
   configurado. Se clonar do zero, regere seguindo `identity-service/README.md` → *RSA key pair*.
+- Nenhuma conta/API key de provedor de e-mail é necessária — o envio é **simulado** (log). Ver §9.
 
 ---
 
 ## 1. Subir os containers
 
-Suba o **identity primeiro** — o scheduling valida os tokens que o identity emite.
+Um comando só, na **raiz do repo** — sobe os 4 apps + 4 MySQL + RabbitMQ + Kafka (compartilhados,
+um container só de cada) + Kafka UI + Adminer, tudo na mesma rede Docker:
 
 ```bash
-cd identity-service
 docker compose up --build -d
 ```
 
-Sobe: `identity-service` (:8080), `mysql-identity` (:3309), `phpmyadmin-identity` (:8082).
-A **primeira** build baixa as dependências Maven (~4 min). Confira:
+A **primeira** build baixa as dependências Maven dos 4 serviços (alguns minutos). Confira:
 
 ```bash
-curl localhost:8080/actuator/health      # {"status":"UP"}
+curl localhost:8080/actuator/health      # identity  — {"status":"UP"}
+curl localhost:8085/actuator/health      # scheduling
+curl localhost:8082/actuator/health      # notification
+curl localhost:8083/actuator/health      # history
 ```
 
-Depois o **scheduling**:
+> **Por que scheduling é :8085 e não :8081?** A 8081 estava ocupada por outro projeto nesta
+> máquina; o mapeamento host→container é `8085:8081`. Rodando fora do Docker (`./mvnw
+> spring-boot:run`) volta a ser 8081. Os outros três (identity 8080, notification 8082,
+> history 8083) usam a porta "de verdade" tanto no host quanto dentro do container.
 
-```bash
-cd ../scheduling-service
-docker compose up --build -d
-```
+> **Testar um serviço isolado?** Cada submódulo ainda tem seu próprio `docker-compose.yml`
+> (`cd scheduling-service && docker compose up --build -d`, etc.) — útil pra debugar um serviço
+> sozinho, mas **não** suba mais de um desses ao mesmo tempo: cada um declara seu próprio
+> RabbitMQ/Kafka/porta e colide com os outros. Pra ponta a ponta, use sempre o compose da raiz.
 
-Sobe: `scheduling-service` (host **:8085** → container 8081), `mysql-scheduling` (:3306),
-`rabbitmq` (:5672 / UI :15672), `kafka` (:9092), `kafka-ui` (:8084), `phpmyadmin-scheduling` (:8083).
-
-```bash
-curl localhost:8085/actuator/health      # {"status":"UP"}
-```
-
-> **Por que :8085 e não :8081?** A 8081 estava ocupada por outro projeto na máquina. Todos os
-> endpoints e o GraphiQL do scheduling usam **:8085** no Docker. Rodando no host (`./mvnw
-> spring-boot:run`) volta a ser 8081.
-
-Parar depois: `docker compose down` (ou `down -v` pra apagar também o volume do MySQL).
+Parar depois: `docker compose down` (ou `down -v` pra apagar também os volumes dos 4 MySQL).
 
 ---
 
@@ -108,7 +111,8 @@ Na collection **identity-service**, rode em ordem:
 4. **`1 · auth → POST /auth/login (registered doctor)`** → `200`. **Esse** token (role `DOCTOR`) é o
    que o scheduling aceita para agendar.
 
-Confirme no phpMyAdmin (`identity_db.users`) ou em **`GET /users/{id}`**.
+Confirme no Adminer (http://localhost:8090, servidor `mysql-identity`, base `identity_db` →
+tabela `users`) ou em **`GET /users/{id}`**.
 
 Testes de erro que valem ver: `POST /users` sem token → `401`; com token não-admin → `403`;
 `POST /auth/refresh` com o mesmo token 2× → a 2ª dá `401` (rotação).
@@ -145,9 +149,10 @@ O schema em texto puro (sem token) está em http://localhost:8085/graphql/schema
 
 ## 6. Ver a consulta no banco
 
-**phpMyAdmin do scheduling**: http://localhost:8083 (`root`/`root`) → base **`scheduling_db`** →
-tabela **`appointments`**. Cada `scheduleAppointment` = 1 linha (`id`, `patient_id`, `doctor_id`,
-`scheduled_at`, `status`, `created_at`). `editAppointment` altera a linha existente.
+**Adminer**: http://localhost:8090 (servidor `mysql-scheduling`, `root`/`root`) → base
+**`scheduling_db`** → tabela **`appointments`**. Cada `scheduleAppointment` = 1 linha (`id`,
+`patient_id`, `doctor_id`, `scheduled_at`, `status`, `created_at`). `editAppointment` altera a
+linha existente.
 
 CLI equivalente:
 ```bash
@@ -160,8 +165,9 @@ docker exec mysql-scheduling mysql -uroot -proot scheduling_db \
 ## 7. Ver as mensagens nas filas
 
 O scheduling publica em **dois** brokers a cada agendamento. Como `notification-service` e
-`history-service` ainda não estão rodando, nada consome — as mensagens ficam acumuladas, ótimo pra
-inspecionar.
+`history-service` já estão rodando (subiram juntos no passo 1), o consumo é **quase imediato** —
+se você for rápido no Kafka UI / RabbitMQ UI ainda dá pra ver a mensagem passando; senão, ela já
+vai ter sido processada e vai aparecer direto nos passos 9/10 (histórico e e-mail).
 
 ### Kafka — evento para o history-service
 
@@ -207,26 +213,56 @@ inspecionar.
 
 ---
 
-## 9. notification-service — *a documentar*
+## 9. notification-service — o lembrete por e-mail (simulado)
 
-- [ ] Subir junto (consome `reminder.queue`)
-- [ ] Como ver o lembrete sendo processado / enviado
-- [ ] Efeito no contador da `reminder.queue` (deve zerar conforme consome)
+O `notification-service` consome `reminder.queue` (RabbitMQ), resolve nome/e-mail do paciente via
+`GET /users/{id}` no identity, e "envia" o lembrete — hoje isso é **simulado**: `LoggingEmailSender`
+só loga o e-mail em vez de chamar um provedor real (a integração com um provedor de verdade, tipo
+Brevo, fica pra uma segunda etapa — a porta `EmailSender` já existe pronta pra essa troca).
 
-## 10. history-service — *a documentar*
+1. **RabbitMQ UI** (http://localhost:15672, `guest`/`guest`) → **Queues and Streams** →
+   `reminder.queue` → o contador de mensagens deve zerar logo depois do `scheduleAppointment` do
+   passo 5 (consumo é automático).
+2. Log do container: `docker logs notification-service` → procure por
+   `Simulated e-mail sent to <nome> <<e-mail>> — subject: "..."`. Isso confirma que a mensagem
+   chegou certinho na fila, foi resolvida no identity e passou pelo caminho inteiro do use case.
+3. Duplicar o mesmo `appointmentId` (reenviando a mensagem manualmente pelo RabbitMQ UI) não gera
+   uma segunda linha de log — dedup via tabela `processed_reminders` (veja no Adminer, servidor
+   `mysql-notification`).
+4. Publicar com um `patientId` que **não existe** no identity → sem provider pra falhar, a única
+   forma de cair na `reminder.dlq` agora é a busca do paciente falhar (404 no identity) — depois do
+   retry (3 tentativas, 2s de intervalo), a mensagem aparece em **Queues and Streams → reminder.dlq**.
 
-- [ ] Subir junto (consome `appointment-events` no Kafka)
-- [ ] Consumer group aparecendo no Kafka UI
-- [ ] Queries de histórico (`history`, `futureAppointments`) + regra "paciente só vê o próprio"
-- [ ] Banco `history_db` (read model) no phpMyAdmin
+## 10. history-service — o histórico via GraphQL
 
-> Quando for testar esses dois, a gente preenche as seções acima.
+O `history-service` consome `appointment-events` (Kafka), monta o read model
+(`appointment_history`) e serve duas queries GraphQL.
+
+1. **Kafka UI** (http://localhost:8084) → **Consumers** → deve aparecer o grupo **`history`**
+   com lag baixo/zero — sinal de que ele está consumindo o tópico `appointment-events`.
+2. **GraphiQL**: http://localhost:8083/graphiql → aba **Headers** → cole
+   `{ "Authorization": "Bearer <accessToken>" }` (o mesmo token do passo 5) → **F5**.
+   ```graphql
+   query {
+     history(patientId: "<patientId>") {
+       id patientName doctorName scheduledAt status
+     }
+   }
+   ```
+   Depois de um `scheduleAppointment` (passo 5), a linha deve aparecer aqui em poucos segundos,
+   com `patientName`/`doctorName` já resolvidos pelo identity. `editAppointment` (mudança de
+   status) atualiza a **mesma** linha, sem duplicar.
+3. `futureAppointments(patientId: ...)` só devolve o que está `SCHEDULED` com data no futuro.
+4. Regra "paciente só vê o próprio": logue como o **paciente** (token com `role: PATIENT`, veja
+   `identity_db.users`/passo 4) e chame `history(patientId: "outro-id-qualquer")` — o resultado
+   volta com o histórico do **próprio** paciente do token, ignorando o argumento.
+5. Banco: Adminer (http://localhost:8090, servidor `mysql-history`) → tabelas
+   `appointment_history` (read model) e `processed_events` (idempotência do consumer).
 
 ---
 
 ## Reset rápido
 
 ```bash
-cd identity-service   && docker compose down -v   # -v apaga o MySQL → volta só o admin semeado
-cd ../scheduling-service && docker compose down -v # apaga MySQL + volume; Kafka/Rabbit recriam limpos
+docker compose down -v   # para tudo e apaga os 4 volumes de MySQL — volta só o admin semeado no identity
 ```
