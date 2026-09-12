@@ -1,6 +1,6 @@
 <mxfile host="65bd71144e">
     <diagram name="Página-1" id="u4xIykFSWkHJ1O7X0Jwk">
-        <mxGraphModel dx="3984" dy="832" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1400" pageHeight="1450" math="0" shadow="0">
+        <mxGraphModel dx="2133" dy="416" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1400" pageHeight="1450" math="0" shadow="0">
             <root>
                 <mxCell id="0"/>
                 <mxCell id="1" parent="0"/>
@@ -111,7 +111,7 @@
         </mxGraphModel>
     </diagram>
     <diagram name="Fluxo ponta a ponta" id="e2e-flow-page-01">
-        <mxGraphModel dx="1451" dy="335" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="900" pageHeight="1720" math="0" shadow="0">
+        <mxGraphModel dx="733" dy="416" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="900" pageHeight="1720" math="0" shadow="0">
             <root>
                 <mxCell id="e2e-0"/>
                 <mxCell id="e2e-1" parent="e2e-0"/>
