@@ -1,51 +1,81 @@
 # Hospital Appointment System
 
-A backend of **four independent microservices** for hospital appointment scheduling,
-patient history, and automatic reminders, with role-based access and asynchronous
-communication. This README is also the **context and rules for AI assistants** working
-on the codebase — follow every rule here.
+Backend of **four independent microservices** for hospital appointment scheduling, patient
+history, and automatic reminders, with role-based access control and asynchronous
+service-to-service communication.
 
----
+Built as a graduate (pós-graduação) project to demonstrate Clean Architecture, CQRS, event-driven
+integration between services, and stateless JWT security in a realistic multi-service backend.
 
-## 1. Language & conventions (strict — for AI and humans)
-
-- **ALL code, identifiers, comments, commit messages, logs, test names, and docs are in English.** Portuguese may appear only in chat, never in artifacts.
-- Each service follows **Clean Architecture**. The dependency rule is absolute:
-  - `domain`: pure entities and business rules. No framework imports, no annotations.
-  - `application`: use cases as **plain POJOs** (no `@Component`/`@Service`), dependencies via constructor. **Ports (interfaces) are defined here.**
-  - `infrastructure`: all framework detail — GraphQL/REST adapters, persistence, messaging, security, and `@Configuration` wiring.
-- Use cases are wired with `@Bean` in an infrastructure `@Configuration` (never annotated in `application`).
-- **Golden check:** open any `domain`/`application` class and inspect imports. If you see `org.springframework`, `RestClient`, `RabbitTemplate`, `KafkaTemplate`, or any concrete infra class → it's a leak. Every external collaborator of a use case must be a **port** you defined in the core.
-- Persistence entities (with `@Table`/`@Id`) live in `infrastructure` and are mapped to/from domain entities — persistence annotations never touch the domain.
-- Stack: **Java 21, Spring Boot 4.1, Spring Data JDBC (no JPA/Hibernate), MySQL, Flyway, Spring for GraphQL, Spring Security (JWT RS256), RabbitMQ, Kafka.** Tests: JUnit 5 + Mockito + AssertJ (unit); Testcontainers (integration). Coverage target: **80% (JaCoCo)**.
-
----
-
-## 2. Services overview
-
-| Service | Port | Responsibility | DB |
+| Service | Repo (submodule) | Port | Responsibility |
 |---|---|---|---|
-| `identity-service` | 8080 | Authentication, JWT issuance, user management (source of truth for users) | `identity_db` |
-| `scheduling-service` | 8081 | Writes appointments (source of truth), publishes events | `scheduling_db` |
-| `notification-service` | 8082 | Consumes reminders and sends them to patients | none (optional) |
-| `history-service` | 8083 | Read side (CQRS): consumes events, serves history queries | `history_db` |
+| [`identity-service`](identity-service/README.md) | `biadevcosta/identity-service` | 8080 | Authentication, JWT (RS256) issuance, user management |
+| [`scheduling-service`](scheduling-service/README.md) | `biadevcosta/scheduling-service` | 8081 | Writes appointments (source of truth), publishes events |
+| [`notification-service`](notification-service/README.md) | `biadevcosta/notification-service` | 8082 | Consumes reminders, resolves the patient's contact, sends them |
+| [`history-service`](history-service/README.md) | `biadevcosta/history-service` | 8083 | Read side (CQRS): consumes events, serves history queries |
 
-Key properties:
-- **CQRS:** `scheduling` writes; `history` serves reads from its own read model.
-- **Two brokers:** RabbitMQ = task (reminder); Kafka = event log (history feed).
-- **Stateless JWT (RS256):** `identity` signs with the private key; every service validates with the public key. No shared session, no gateway.
-- **Database per service:** no service reads another service's database.
-- **User data on demand:** services needing a user's name/email call `identity-service` over HTTP (behind a port, with cache). No data replication.
+Each service has its own README with endpoints, request/response examples, and how to run and test
+it in isolation. This document covers the system as a whole: architecture, business rules,
+communication between services, and how to run everything together.
+
+See [`arquitetura-sistemas.drawio`](arquitetura-sistemas.drawio) for the visual diagrams
+(component/data-flow view and an end-to-end walkthrough) — open it at [app.diagrams.net](https://app.diagrams.net).
 
 ---
 
-## 3. BUSINESS RULES (authoritative)
+## 1. Architecture
 
-These rules are the core of the system. Implement them exactly.
+Every service follows **Clean Architecture** with the same three layers and the same dependency
+rule: dependencies point inward, never outward.
 
-### 3.1 Roles and permissions
+```
+<service>/
+├── domain/            pure entities + business rules — no framework imports
+├── application/       use cases as plain classes (no framework annotations)
+│                       + ports (interfaces) that the domain/use cases depend on
+└── infrastructure/    everything concrete: GraphQL/REST adapters, persistence,
+                        messaging, security, @Configuration wiring
+```
 
-Three roles: `DOCTOR`, `NURSE`, `PATIENT`.
+- `domain`: entities and invariants only. No Spring, no JPA/JDBC annotations, no HTTP/messaging types.
+- `application`: use cases as plain objects, wired with dependencies through the constructor. Ports
+  (interfaces) that a use case needs — a repository, a publisher, a token issuer — are **defined
+  here**, never in `infrastructure`.
+- `infrastructure`: implements every port with a concrete adapter (a JDBC repository, a Rabbit/Kafka
+  publisher, an HTTP client), exposes the API (GraphQL resolver or REST controller), and wires it
+  all together with `@Configuration` classes.
+
+**Why this shape:** a use case's test never needs Spring, a real database, or a real broker — every
+collaborator is an interface a test can fake. Swapping an adapter (e.g. a different e-mail provider,
+a different message broker) never touches `domain` or `application`.
+
+Stack: **Java 21, Spring Boot 4.1, Spring Data JDBC (no JPA/Hibernate), MySQL, Flyway, Spring for
+GraphQL, Spring Security (JWT RS256), RabbitMQ, Kafka.** Tests: JUnit 5 + Mockito + AssertJ (unit),
+Testcontainers (integration). Coverage gate: **80% line coverage (JaCoCo)** per service.
+
+Key system-wide properties:
+
+- **CQRS:** `scheduling-service` writes; `history-service` serves reads from its own read model,
+  built asynchronously from events.
+- **Two message brokers, two different jobs:** RabbitMQ carries a one-off task (send this reminder);
+  Kafka carries an ordered, replayable event log (the history feed).
+- **Stateless JWT (RS256):** `identity-service` signs tokens with a private key; every other service
+  validates them locally with the matching public key. No shared session store, no API gateway,
+  no network call needed just to check if a token is valid.
+- **Database per service:** each service owns its schema; no service reads another service's
+  database directly.
+- **User data resolved on demand:** a service that needs a user's name/e-mail calls
+  `identity-service` over HTTP (through a port, with a local cache) instead of copying user data
+  into its own database.
+
+---
+
+## 2. Business rules
+
+### 2.1 Roles and permissions
+
+Three roles: `DOCTOR`, `NURSE`, `PATIENT` (plus `ADMIN`, internal to `identity-service`, used only
+to register users).
 
 | Capability | DOCTOR | NURSE | PATIENT |
 |---|:---:|:---:|:---:|
@@ -54,485 +84,198 @@ Three roles: `DOCTOR`, `NURSE`, `PATIENT`.
 | Read appointment history | ✅ (any patient) | ✅ (any patient) | ✅ (own only) |
 | Read future appointments | ✅ (any patient) | ✅ (any patient) | ✅ (own only) |
 
-Operation → allowed roles:
-- `scheduleAppointment` (mutation) → `DOCTOR`, `NURSE`
-- `editAppointment` (mutation) → `DOCTOR` **and** must be the owner (see 3.3)
-- `history` / `futureAppointments` (queries) → `DOCTOR`, `NURSE`, `PATIENT`
+| Operation | Allowed roles |
+|---|---|
+| `scheduleAppointment` (mutation) | `DOCTOR`, `NURSE` |
+| `editAppointment` (mutation) | `DOCTOR`, **and** must be the appointment's owner |
+| `history` / `futureAppointments` (queries) | `DOCTOR`, `NURSE`, `PATIENT` |
 
-### 3.2 Appointment lifecycle
+### 2.2 Appointment lifecycle
 
 - Status is an enum: `SCHEDULED`, `COMPLETED`, `CANCELLED`.
 - A newly created appointment starts as `SCHEDULED`.
 - **"Future appointment"** = status `SCHEDULED` **and** `scheduledAt` in the future.
 - **"History"** = all appointments of a patient, regardless of status.
 
-### 3.3 Ownership rules (business logic — inside the use case)
+### 2.3 Ownership rules
 
-- **Only the owner edits:** the appointment's doctor (`doctorId`) is the owner. Only that doctor may edit it. Enforce this **in the domain/use case**, not only via the role gate.
-- **Patient sees only their own:** for a `PATIENT` caller, the `patientId` used to query MUST come from the **authenticated token**, never from a client-supplied argument. Do not trust an incoming `patientId` for a patient caller. For `DOCTOR`/`NURSE`, the requested `patientId` argument is honored.
+- **Only the owner edits:** the appointment's doctor (`doctorId`) is its owner. Only that doctor may
+  edit it — enforced inside the domain/use case, not only by the role gate.
+- **A patient only sees their own data:** for a `PATIENT` caller, the `patientId` used to query
+  history/future appointments comes from the **authenticated token**, never from a client-supplied
+  argument. For `DOCTOR`/`NURSE`, the requested `patientId` argument is honored.
 
-### 3.4 Invariants (reject with a domain exception)
+### 2.4 Invariants (rejected with a domain exception)
 
-- `scheduledAt` must be in the **future** at creation and at edit.
+- `scheduledAt` must be in the **future**, both at creation and at edit.
 - `patientId` and `doctorId` are required.
-- Status transitions use only the valid enum values.
-- (Optional feature) reject double-booking: same doctor, same time slot.
+- Status transitions only ever use a valid enum value.
 
-### 3.5 Authorization placement (Clean Architecture)
+### 2.5 Where authorization lives
 
-- **Coarse role gate** (`hasRole` / `hasAnyRole`) → on the adapter (GraphQL resolver / controller) via `@PreAuthorize`.
-- **Fine-grained rules** (ownership, "patient only own") → inside the **use case**, receiving the caller identity (role, userId/patientId) as a **parameter**. **Never** read `SecurityContextHolder` inside the core.
+- **Coarse role gate** (`hasRole` / `hasAnyRole`) → on the adapter, via `@PreAuthorize` on the
+  GraphQL resolver / REST controller.
+- **Fine-grained rules** (ownership, "patient sees only their own") → inside the **use case**,
+  which receives the caller's identity (role, userId/patientId) as a plain constructor/method
+  parameter. The core never reads `SecurityContextHolder` directly.
 
-### 3.6 Messaging behavior
+### 2.6 Messaging behavior
 
-- In `scheduling`, on **create** and on **edit**, the order is: (1) validate, (2) **persist** to the database, (3) **then** publish. Never publish before persisting.
-  - Publish to **RabbitMQ**: `AppointmentReminder` (carries IDs, e.g. `appointmentId`, `patientId`, `scheduledAt`).
-  - Publish to **Kafka** topic `appointment-events`: `AppointmentCreated` / `AppointmentUpdated` (carries IDs; partition key = `patientId` for per-patient ordering).
-- `notification-service` consumes the reminder, resolves the patient's name/email from `identity-service` (via a port, cached), and sends the reminder (log channel is acceptable; real email/SMS is pluggable).
-- `history-service` consumes `appointment-events` **idempotently** (a `processed_events` table; ignore already-seen `eventId` — Kafka may redeliver), builds/updates its read model, and resolves user names from `identity-service` at query time (shows the **current** name).
-
-### 3.7 Identity & tokens
-
-- `identity-service` authenticates (login), hashes passwords with **BCrypt**, and issues a **JWT signed with RS256** (private key).
-- JWT claims: `sub` (userId), `role`, `patientId` (only for patient users), plus `iss`, `aud`, `exp`, `iat`.
-- Other services validate the token with the **public key** (stateless). They never call `identity` to validate a token — only to fetch user profile data when needed.
+- In `scheduling-service`, on both **create** and **edit**, the order is always: (1) validate,
+  (2) **persist**, (3) **then** publish. Nothing is ever published before the appointment is saved.
+  - RabbitMQ — `AppointmentReminder` (carries only ids: `appointmentId`, `patientId`, `scheduledAt`).
+  - Kafka topic `appointment-events` — `AppointmentCreated` / `AppointmentUpdated` (ids + status;
+    partition key = `patientId`, so events for the same patient are strictly ordered).
+- `notification-service` consumes the reminder, resolves the patient's name/e-mail from
+  `identity-service` (cached), and sends it (delivery is currently a log line — a real provider is
+  a pluggable adapter, see its README).
+- `history-service` consumes `appointment-events` **idempotently** (a `processed_events` table
+  ignores an already-seen `eventId`, since Kafka may redeliver), builds/updates its read model, and
+  resolves user names from `identity-service` at query time (so it always shows the **current**
+  name, not a stale copy).
 
 ---
 
-## 4. Communications
+## 3. Communication between services
 
-Rule: **client → service is synchronous (HTTP); service → service is asynchronous (broker)** — except the on-demand user lookups to `identity`, which are synchronous HTTP (cached, on the least-critical paths).
+Rule: **client → service is synchronous (HTTP/GraphQL)**; **service → service is asynchronous
+(broker)** — the only exception is the on-demand user lookup to `identity-service`, which is a
+synchronous, cached HTTP call on a non-critical path.
 
-| From → to | Type | Mechanism | Payload |
+| From → To | Type | Mechanism | Payload |
 |---|---|---|---|
-| Client → Identity | sync | HTTP (login) | credentials → token; profile |
-| Client → Scheduling | sync | GraphQL + JWT | schedule/edit mutation |
-| Client → History | sync | GraphQL + JWT | history / future queries |
-| Scheduling → History | async | Kafka `appointment-events` | appointment created/updated (IDs) |
-| Scheduling → Notification | async | RabbitMQ `reminder.queue` | reminder (IDs) |
-| Notification → Identity | sync | HTTP (cached) | patient name/email |
-| History → Identity | sync | HTTP (cached) | resolve user names |
+| Client → Identity | sync | HTTP REST | credentials → JWT; user registration |
+| Client → Scheduling | sync | GraphQL + JWT | schedule / edit mutation |
+| Client → History | sync | GraphQL + JWT | history / future-appointments query |
+| Scheduling → Notification | async | RabbitMQ `reminder.queue` | reminder (ids only) |
+| Scheduling → History | async | Kafka `appointment-events` | appointment created/updated (ids + status) |
+| Notification → Identity | sync (cached) | HTTP | patient name/e-mail |
+| History → Identity | sync (cached) | HTTP | user name resolution |
 
----
+### Data per service
 
-## 5. Data & messaging
-
-Databases (one per service):
-
-| DB | Service | Tables |
+| Database | Owner | Tables |
 |---|---|---|
-| `identity_db` | identity | `users`, `doctor_profile`, `patient_profile` |
-| `scheduling_db` | scheduling | `appointments` |
-| `history_db` | history | `appointment_history`, `processed_events` |
+| `identity_db` | identity-service | `users`, `refresh_tokens` |
+| `scheduling_db` | scheduling-service | `appointments` |
+| `notification_db` | notification-service | `processed_reminders` (idempotency only) |
+| `history_db` | history-service | `appointment_history`, `processed_events` |
 
-Brokers:
+### Brokers
 
-| Broker | Name | Flow |
-|---|---|---|
-| RabbitMQ | `reminder.queue` (+ `reminder.dlq`) | Scheduling → Notification |
-| Kafka | `appointment-events` (key = `patientId`) | Scheduling → History |
-
-Ports defined in the core (implemented by infrastructure adapters):
-`AppointmentRepository`, `ReminderPublisher`, `AppointmentEventPublisher`,
-`UserDirectory`, `PasswordHasher`, `TokenIssuer`, `HistoryRepository`, `ProcessedEventStore`.
-
----
-
-## 6. Repository layout (per service)
-
-```
-<service>/
-├── domain/            # pure entities + business rules (no framework)
-├── application/       # use cases (POJOs) + ports (interfaces) + commands
-└── infrastructure/    # web (GraphQL/REST), persistence, messaging, security, config
-```
-
-Each service is its own Git repository with its own `Dockerfile`.
-
----
-
-## 7. How to run (local)
-
-Start infrastructure once (MySQL, RabbitMQ, Kafka) via Docker, create the three databases,
-and generate the RSA key pair for RS256. Then run each service (`./mvnw spring-boot:run`) or
-use `docker compose up` to start everything together.
-
-Order to exercise the full flow:
-1. Start `identity` → register a doctor and a patient → log in and copy the token.
-2. Start `scheduling` → schedule an appointment with the token.
-3. Start `notification` → see the reminder logged (name/email fetched from identity).
-4. Start `history` → run the query and see the appointment appear.
-
-Suggested build order: **scheduling → notification → history → identity** (each phase ends with something running end to end).
-
----
-
-## 8. Deliverables
-
-- Working endpoints for all required capabilities, with correct role-based access.
-- Clean, layered code; no service imports another; core free of framework leaks.
-- Tests (unit + Testcontainers integration), **JaCoCo ≥ 80%**, Allure report.
-- Insomnia/Postman collection covering login, schedule/edit, and the queries.
-- README per service + this architecture/rules document.
-
----
-
-## 9. Current implementation status
-
-| Service | Port | Responsibility | Status |
+| Broker | Name | Flow | Semantics |
 |---|---|---|---|
-| `scheduling-service` | 8081 | Writes appointments (source of truth), publishes reminder (Rabbit) and event (Kafka) | ✅ **implemented + tested** |
-| `identity-service` | 8080 | Authentication, JWT RS256 issuance, user registration | ⏳ skeleton |
-| `notification-service` | 8082 | Consumes the Rabbit reminder, resolves contact via identity, "sends" | ⏳ skeleton |
-| `history-service` | 8083 | Read side (CQRS): consumes Kafka events, serves GraphQL queries | ⏳ skeleton |
-
-Each service is its own **Git submodule** (`github.com/biadevcosta/<service>`).
-
-> ⚠️ The skeletons' `pom.xml` use **Spring Boot 4.1** module names
-> (`spring-boot-starter-webmvc`, `spring-boot-starter-flyway`, per-slice test starters).
-> The implementation guide was written for Boot 3.x — follow what's in `pom.xml`.
+| RabbitMQ | `reminder.queue` (+ `reminder.dlq`) | scheduling → notification | one-off task, retried 3× then dead-lettered |
+| Kafka | `appointment-events` (key = `patientId`) | scheduling → history | ordered per patient, replayable, consumer is idempotent |
 
 ---
 
-## 10. Messaging configuration (what has been defined)
+## 4. Security — JWT signed with RS256
 
-Messaging was configured **on the producer side**, inside `scheduling-service`. The two brokers
-have different roles:
+`identity-service` is the only service that can **issue** a token; every other service can only
+**verify** one. This is possible because RS256 is an asymmetric signature: a **private key**
+produces a signature that only the matching **public key** can verify, and the public key alone is
+useless for forging a new signature.
 
-| Broker | Role | Flow | Semantics |
-|---|---|---|---|
-| **RabbitMQ** | **Task** queue (reminder) | scheduling → notification | 1 logical consumer, with retry + DLQ |
-| **Kafka** | **Event log** (history feed) | scheduling → history | ordered per patient, replayable, idempotent on the consumer |
+- `identity-service` holds `private.pem` and signs every access token with it after a successful
+  login.
+- `scheduling-service` and `history-service` hold a copy of `public.pem` and validate the token's
+  signature **locally**, with no network call back to `identity-service` — keeping the write and
+  read paths fast and decoupled. `identity-service` is only ever called synchronously to fetch a
+  user's profile (name/e-mail), never to ask "is this token valid?".
 
-Golden rule applied in the use cases: **validate → persist → publish**. Nothing is published before
-the appointment is saved to the database (`ScheduleAppointmentUseCase` / `EditAppointmentUseCase`).
+Token claims: `sub` (userId), `role`, `patientId` (only for patient users), plus `iss`, `aud`,
+`iat`, `exp`.
 
-### 10.1 RabbitMQ — appointment reminder
-
-**Connection** (`application.yaml`)
-
-```yaml
-spring:
-  rabbitmq:
-    host: localhost
-    port: 5672
-    username: guest
-    password: guest
-app:
-  rabbit:
-    exchange: appointment.reminders   # DirectExchange
-    queue: reminder.queue             # main queue (durable)
-    routing-key: appointment.reminder
-```
-
-**Topology declared in code** (`infrastructure/messaging/rabbit/RabbitConfig.java`)
-
-| Bean | What it is | Detail |
-|---|---|---|
-| `reminderExchange` | `DirectExchange` `appointment.reminders` | — |
-| `reminderQueue` | durable `Queue` `reminder.queue` | args: `x-dead-letter-exchange = ""` (default exchange) and `x-dead-letter-routing-key = reminder.dlq` |
-| `reminderDlq` | durable `Queue` `reminder.dlq` | "dead" (rejected/expired) messages land here |
-| `reminderBinding` | binding | binds `reminder.queue` → `appointment.reminders` with routing key `appointment.reminder` |
-| `rabbitJsonConverter` | `Jackson2JsonMessageConverter` | payload travels as JSON |
-| `rabbitTemplate` | `RabbitTemplate` | uses the JSON converter |
-
-**Publisher** — `RabbitReminderPublisher implements ReminderPublisher` (core port).
-Calls `convertAndSend(exchange, routingKey, payload)`.
-
-**Payload** — `AppointmentReminderMessage(appointmentId, patientId, scheduledAt)`.
-IDs only; `notification-service` resolves name/email from `identity-service`.
-
-**Retry + DLQ:** the main queue already dead-letters to `reminder.dlq`. **Retry** (retrying
-N times before sending to the DLQ) is the **consumer's** responsibility (`notification-service`), via
-`application.yaml` — not implemented yet. Planned config:
-
-```yaml
-spring:
-  rabbitmq:
-    listener:
-      simple:
-        retry: { enabled: true, max-attempts: 3, initial-interval: 2000 }
-        default-requeue-rejected: false   # rejected goes to the DLQ, not back to the queue
-```
-
-### 10.2 Kafka — appointment events (history feed)
-
-**Connection + serialization** (`application.yaml`)
-
-```yaml
-spring:
-  kafka:
-    bootstrap-servers: localhost:9092
-    producer:
-      key-serializer: org.apache.kafka.common.serialization.StringSerializer
-      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
-      properties:
-        spring.json.add.type.headers: true
-app:
-  kafka:
-    topic: appointment-events
-```
-
-**Topic declared in code** (`infrastructure/messaging/kafka/KafkaConfig.java`)
-
-| Bean | Detail |
-|---|---|
-| `appointmentEventsTopic` | `NewTopic` `appointment-events`, **3 partitions**, 1 replica (dev) |
-
-**Publisher** — `KafkaAppointmentEventPublisher implements AppointmentEventPublisher` (core port).
-`publishCreated` / `publishUpdated` call `kafkaTemplate.send(topic, patientId, event)`.
-
-- **Message key = `patientId`** → all events for a patient go to the same partition
-  ⇒ **per-patient ordering** guaranteed.
-- **`eventId` (random UUID)** on each event → `history-service` uses it for **idempotency**
-  (`processed_events` table, ignores an already-seen `eventId`, since Kafka may redeliver).
-
-**Payload** — `AppointmentEventMessage`:
-
-```
-type          "AppointmentCreated" | "AppointmentUpdated"   (constants CREATED / UPDATED)
-eventId       unique UUID for the publication (consumer idempotency)
-appointmentId, patientId, doctorId
-scheduledAt, status
-```
-
-**Consumer (`history-service`)** — not implemented yet. Planned config:
-
-```yaml
-spring:
-  kafka:
-    consumer:
-      group-id: history
-      auto-offset-reset: earliest
-      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
-      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
-      properties:
-        spring.json.trusted.packages: "*"
-```
-
-### 10.3 Summary of what runs today
-
-```
-Client ──GraphQL+JWT──▶ scheduling-service
-                              │  1) validates (domain)
-                              │  2) persists to scheduling_db  (Flyway: V1__create_appointments.sql)
-                              │  3) publishes:
-                              ├─▶ RabbitMQ  exchange "appointment.reminders"
-                              │        routing-key "appointment.reminder"
-                              │        → queue "reminder.queue"  (DLQ: "reminder.dlq")
-                              │        payload: AppointmentReminderMessage (IDs)
-                              └─▶ Kafka  topic "appointment-events" (key = patientId)
-                                       payload: AppointmentEventMessage (type, eventId, IDs, status)
-```
-
-Consumers (`notification-service` on Rabbit, `history-service` on Kafka) are the **next step**.
-
----
-
-## 11. What has been implemented in `scheduling-service`
-
-Structured with **Clean Architecture** (the dependency rule is absolute: `domain` and `application`
-import nothing from any framework).
-
-```
-domain/
-  Appointment                 entity + rules: required IDs, scheduledAt in the future,
-                              "only the owning doctor edits" (edit(callerDoctorId, ...))
-  AppointmentStatus           SCHEDULED | COMPLETED | CANCELLED
-  exception/                  AppointmentException, InvalidAppointmentException,
-                              NotAppointmentOwnerException, AppointmentNotFoundException
-
-application/
-  usecase/ScheduleAppointmentUseCase   validate → repo.save → reminder.publish → event.publishCreated
-  usecase/EditAppointmentUseCase       repo.findById → appointment.edit(...) → repo.save → event.publishUpdated
-  port/AppointmentRepository            ports (interfaces) defined in the core
-  port/ReminderPublisher
-  port/AppointmentEventPublisher
-  command/ScheduleAppointmentCommand, EditAppointmentCommand
-
-infrastructure/
-  persistence/   AppointmentEntity (@Table, @Id, @Version), AppointmentJdbcRepository (CrudRepository),
-                 AppointmentMapper, AppointmentRepositoryImpl (implements the port;
-                 uses @Version to decide INSERT vs UPDATE, id generated in the domain)
-  messaging/     AppointmentReminderMessage, AppointmentEventMessage
-                 rabbit/RabbitConfig + RabbitReminderPublisher
-                 kafka/KafkaConfig + KafkaAppointmentEventPublisher
-  security/      SecurityConfig — stateless resource server, validates JWT RS256 with public.pem,
-                 converts the "role" claim → authority ROLE_<role>, @EnableMethodSecurity
-  web/graphql/   AppointmentMutationController (@PreAuthorize does the coarse role gate)
-                 DomainExceptionResolver (domain exception → GraphQL error FORBIDDEN/NOT_FOUND/BAD_REQUEST)
-  config/        UseCaseConfig — wires the use cases (POJOs) via @Bean
-```
-
-**Where each rule is applied**
-
-| Rule | Location |
-|---|---|
-| `scheduleAppointment` → `DOCTOR`/`NURSE`; `editAppointment` → `DOCTOR` | `@PreAuthorize` on the GraphQL resolver |
-| Only the owning doctor (`doctorId`) edits | `Appointment.edit(callerDoctorId, …)` in the domain |
-| `scheduledAt` must be in the future (create and edit) | `Appointment.schedule` / `Appointment.edit` |
-| Persist before publishing | use cases |
-| Caller identity passed as a **parameter** (never `SecurityContextHolder` in the core) | `EditAppointmentCommand.callerId` = `jwt.getSubject()` |
-
-**GraphQL** (`src/main/resources/graphql/schema.graphqls`)
-
-```graphql
-type Mutation {
-  scheduleAppointment(input: ScheduleInput!): Appointment!
-  editAppointment(input: EditInput!): Appointment!
-}
-type Query { _ping: String! }
-```
-
-**Migration** (`src/main/resources/db/migration/V1__create_appointments.sql`) — `appointments`
-table (`id`, `version`, `patient_id`, `doctor_id`, `scheduled_at`, `status`, `created_at`)
-plus indexes by patient and by doctor.
-
----
-
-## 12. Configuration
-
-### 12.1 `application.yaml` (scheduling-service) — main keys
-
-| Key | Default value |
-|---|---|
-| `server.port` | `8081` |
-| `spring.datasource.url` | `jdbc:mysql://localhost:3306/scheduling_db` (root/root) |
-| `spring.rabbitmq.*` | `localhost:5672`, guest/guest |
-| `spring.kafka.bootstrap-servers` | `localhost:9092` |
-| `security.jwt.public-key` | `classpath:public.pem` |
-| `app.rabbit.exchange / queue / routing-key` | `appointment.reminders` / `reminder.queue` / `appointment.reminder` |
-| `app.kafka.topic` | `appointment-events` |
-
-### 12.2 RSA key pair (JWT RS256)
-
-Generated once in `keys/` at the repository root (not committed — see `.gitignore`):
+Generating the key pair (done once, `private.pem` is git-ignored everywhere):
 
 ```bash
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out keys/private.pem
 openssl rsa -in keys/private.pem -pubout -out keys/public.pem
 ```
 
-- `public.pem` was **copied to `src/main/resources/`** of all four services (token validation).
-- `private.pem` lives **only in `identity-service`** (signing). In production it would come from a
-  secret/environment variable; versioning the **public** key is acceptable here, the **private** one is not
-  — both are kept out of git via `.gitignore`.
+`public.pem` is copied into every service's `src/main/resources/`; `private.pem` lives only in
+`identity-service`.
 
 ---
 
-## 13. How to run `scheduling-service`
+## 5. Repository layout
 
-### 13.1 Infrastructure (MySQL + RabbitMQ + Kafka)
+Each of the four services is its own Git repository, wired into this one as a **Git submodule**
+(`github.com/biadevcosta/<service>`), with its own `Dockerfile`, `pom.xml`, tests, and README.
 
-`scheduling-service/docker-compose.yml` starts everything (Kafka in KRaft mode, no Zookeeper):
-
-```bash
-cd scheduling-service
-docker compose up -d
 ```
-
-- RabbitMQ UI: <http://localhost:15672> (guest/guest)
-- MySQL: `localhost:3306`, database `scheduling_db`
-
-### 13.2 The service
-
-```bash
-cd scheduling-service
-./mvnw spring-boot:run     # starts on 8081
+hospital-system/
+├── docker-compose.yml          # runs all 4 services + their infra together
+├── arquitetura-sistemas.drawio # architecture + end-to-end flow diagrams
+├── identity-service/           # submodule
+├── scheduling-service/         # submodule
+├── notification-service/       # submodule
+└── history-service/            # submodule
 ```
-
-> ⚠️ Port **8081** may be taken by a `phpmyadmin` container on your machine —
-> stop it or change `server.port` before running.
 
 ---
 
-## 14. How to test `scheduling-service`
+## 6. How to run the whole system
 
-### 14.1 Automated tests
+The root `docker-compose.yml` starts all four services, one MySQL per service, a shared RabbitMQ,
+and a shared Kafka, on a single Docker network:
 
 ```bash
-cd scheduling-service
+git clone --recurse-submodules <this-repo-url>
+cd hospital-system
 
-./mvnw test                 # 29 unit tests (domain + use cases + adapters + resolver)
-./mvnw verify               # + integration test (Testcontainers) + JaCoCo 80% gate
-./mvnw allure:serve         # Allure report in the browser
+# generate the RSA key pair once, then copy the public key into every service
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out keys/private.pem
+openssl rsa -in keys/private.pem -pubout -out keys/public.pem
+cp keys/private.pem identity-service/src/main/resources/private.pem
+cp keys/public.pem  identity-service/src/main/resources/public.pem
+cp keys/public.pem  scheduling-service/src/main/resources/public.pem
+cp keys/public.pem  history-service/src/main/resources/public.pem
+
+docker compose up --build -d
+docker compose logs -f identity scheduling notification history   # follow startup
 ```
 
-Coverage: `target/site/jacoco/index.html`
-(`*Application`, `infrastructure/config/**`, `infrastructure/security/**`, and the broker `*Config`
-classes are excluded from the gate — framework wiring, only exercised by the integration test).
-
-**What the tests cover**
-
-| Test | Verifies |
+| Endpoint | URL |
 |---|---|
-| `AppointmentTest` | creation invariants; "only the owner edits"; date/status edit; rehydration doesn't revalidate |
-| `ScheduleAppointmentUseCaseTest` | `save → publishReminder → publishCreated` order (InOrder); invalid command doesn't touch repo/brokers |
-| `EditAppointmentUseCaseTest` | owner edits and publishes; non-owner is blocked (nothing saved/published); missing id → NotFound; invalid status → Invalid |
-| `AppointmentPersistenceTest` | round-trip mapper; `@Version` null → INSERT, present → UPDATE |
-| `PublisherAdaptersTest` | Rabbit sends only IDs to the right exchange/routing-key; Kafka uses `patientId` as key and `type` CREATED/UPDATED |
-| `AppointmentMutationControllerTest` | resolver delegates to the use case, builds the command with the JWT's `callerId`, maps the view |
-| `DomainExceptionResolverTest` | domain exception → `FORBIDDEN` / `NOT_FOUND` / `BAD_REQUEST` |
-| `SchedulingIntegrationTest` | end to end: real MySQL/RabbitMQ/Kafka + real security + GraphQL over HTTP |
+| identity-service (REST + Swagger) | http://localhost:8080/swagger-ui.html |
+| scheduling-service (GraphiQL) | http://localhost:8085/graphiql |
+| history-service (GraphiQL) | http://localhost:8083/graphiql |
+| notification-service | no API — consumer only, check `docker compose logs notification` |
+| RabbitMQ management UI | http://localhost:15672 (guest/guest) |
+| Kafka UI | http://localhost:8084 |
+| Adminer (all 4 databases) | http://localhost:8090 (root/root) |
 
-> **Integration test (`SchedulingIntegrationTest`)** needs a Docker daemon the docker-java client
-> can reach. On some machines the Docker Desktop pipe returns HTTP 400 to Testcontainers (the
-> `docker` CLI works fine; it's a Docker Desktop incompatibility, not a code issue).
-> The test **self-skips** (`assumeTrue`) when Docker isn't reachable, so `./mvnw verify` still
-> passes. On a "normal" Docker setup it runs unchanged. It signs its own RS256 tokens with an
-> in-memory key pair (`support/SecurityTestConfig`).
+A seeded admin (`admin@hospital.local` / `admin12345`) is created on `identity-service` startup, so
+`POST /users` can be used immediately to register a doctor and a patient.
 
-### 14.2 Manual test (GraphiQL)
+**Exercising the full flow** (see the "end-to-end flow" page in the `.drawio` diagram for the
+illustrated version):
 
-1. Start the infrastructure and the service (section 13).
-2. Open <http://localhost:8081/graphiql>.
-3. Since the route requires a JWT and `identity-service` doesn't exist yet, generate a test RS256
-   token signed with `keys/private.pem` (minimal claims: `sub`, `role`, `exp`). Header in GraphiQL:
+1. `identity` → log in as admin → register a `DOCTOR` and a `PATIENT` → log in as the doctor and
+   keep the access token.
+2. `scheduling` → `scheduleAppointment` with that token → persists to `scheduling_db`, publishes to
+   RabbitMQ and Kafka.
+3. `notification` → consumes the reminder, resolves the patient's name/e-mail from `identity`, logs
+   the simulated e-mail.
+4. `history` → consumes the Kafka event, then `history(patientId)` / `futureAppointments(patientId)`
+   return the appointment.
 
-   ```json
-   { "Authorization": "Bearer YOUR_TOKEN" }
-   ```
+To stop everything: `docker compose down` (add `-v` to also wipe the MySQL volumes).
 
-4. Schedule:
+## 7. How to test
 
-   ```graphql
-   mutation {
-     scheduleAppointment(input: {
-       patientId: "pat-1", doctorId: "doc-1", scheduledAt: "2030-12-01T10:00:00"
-     }) { id status }
-   }
-   ```
+Each service is independently testable — see its README for details. In every service:
 
-5. Edit (owning doctor only, role `DOCTOR`):
+```bash
+cd <service>
+./mvnw test       # unit tests only — no Docker required
+./mvnw verify      # + integration test (Testcontainers) + JaCoCo 80% line-coverage gate
+```
 
-   ```graphql
-   mutation {
-     editAppointment(input: { appointmentId: "<id>", status: "CANCELLED" }) { id status }
-   }
-   ```
+Integration tests self-skip (instead of failing) when no Docker daemon is reachable, so `./mvnw
+verify` always completes. Coverage report: `target/site/jacoco/index.html` in each service.
 
-6. **Confirm messaging:**
-   - RabbitMQ UI (<http://localhost:15672>) → *Queues* tab → `reminder.queue` should have received
-     a message (`AppointmentReminderMessage`).
-   - Kafka → topic `appointment-events` should have an `AppointmentCreated` / `AppointmentUpdated`
-     with key = `patientId`:
-
-     ```bash
-     docker exec -it kafka /opt/kafka/bin/kafka-console-consumer.sh \
-       --bootstrap-server localhost:9092 --topic appointment-events --from-beginning \
-       --property print.key=true
-     ```
-   - Database: `SELECT * FROM scheduling_db.appointments;`
-
----
-
-## 15. Next steps
-
-1. **`notification-service`** — `@RabbitListener` on `reminder.queue`, retry + DLQ in `application.yaml`,
-   `UserDirectory` port (HTTP adapter + Caffeine cache for identity), send channel (log).
-2. **`history-service`** — `@KafkaListener` on `appointment-events` with idempotency
-   (`processed_events`), read model, GraphQL queries `history` / `futureAppointments`
-   ("patient sees only their own" rule inside the use case).
-3. **`identity-service`** — login (BCrypt) + JWT RS256 issuance with `private.pem`,
-   `GET /users/{id}` for the other services to query.
-4. Versioned Insomnia/Postman collection; per-service `README.md`.
+Each service also ships an OpenAPI/GraphiQL explorer (see its README) and, for `identity-service`
+and `scheduling-service`, an importable Insomnia collection.
