@@ -20,6 +20,8 @@ communication between services, and how to run everything together.
 
 See [`arquitetura-sistemas.drawio`](arquitetura-sistemas.drawio) for the visual diagrams
 (component/data-flow view and an end-to-end walkthrough) — open it at [app.diagrams.net](https://app.diagrams.net).
+For a hands-on manual test session (Swagger + GraphiQL, copy-paste ready, PT-BR), see
+[`ROTEIRO-TESTES.md`](ROTEIRO-TESTES.md).
 
 ---
 
@@ -279,3 +281,7 @@ verify` always completes. Coverage report: `target/site/jacoco/index.html` in ea
 
 Each service also ships an OpenAPI/GraphiQL explorer (see its README) and, for `identity-service`
 and `scheduling-service`, an importable Insomnia collection.
+
+For a full manual walkthrough — creating users, scheduling an appointment, checking the
+reminder and the history — with exact requests/variables and expected responses, see
+[`ROTEIRO-TESTES.md`](ROTEIRO-TESTES.md).
