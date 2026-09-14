@@ -19,6 +19,7 @@ seguir pro próximo.
 | RabbitMQ (painel) | http://localhost:15672 (guest/guest) |
 | Kafka UI | http://localhost:8084 |
 | Adminer | http://localhost:8090 (root/root) |
+| Allure (relatório de testes) | http://localhost:5050 |
 
 ## Quem precisa de qual token
 
@@ -269,3 +270,81 @@ Também dá pra consultar direto pela linha de comando, sem abrir o navegador:
 ```bash
 docker exec mysql-history mysql -uroot -proot history_db -e "SELECT * FROM appointment_history;"
 ```
+
+## 10. Suíte automatizada: cobertura (JaCoCo) e relatório (Allure)
+
+Token: nenhum — isso não usa o Docker Compose do sistema nem a API, é Maven rodando local
+em cada serviço (o Testcontainers sobe seus próprios MySQL/RabbitMQ/Kafka descartáveis só
+pros testes de integração).
+
+### Rodar os testes
+
+```bash
+cd <service>     # identity-service | scheduling-service | notification-service | history-service
+./mvnw verify    # unit + integração + gate de cobertura
+```
+
+> Nesta máquina o Maven não enxerga o Docker Desktop pelo named pipe do WSL — os testes de
+> integração (`@SpringBootTest` + Testcontainers) se auto-pulam em vez de falhar (esperado,
+> já documentado no README de cada serviço). O build continua passando, só não soma a
+> cobertura extra que esses testes dariam.
+
+### Cobertura (JaCoCo) — o gate real é 80%, não 100%
+
+O `pom.xml` de cada serviço trava o build se a cobertura de **linha** cair abaixo de
+**80%** (`jacoco-maven-plugin`, goal `check`, fase `verify`) — apesar do nome comum ser
+"cobertura total", o número configurado é 80%, não 100%. Abra o relatório:
+
+```
+target/site/jacoco/index.html
+```
+
+No `scheduling-service`, rodando agora mesmo (com os testes de integração pulados), a
+cobertura real ficou em **99% das instruções / 168 de 169 linhas** — bem acima do gate —
+porque os pacotes que só a integração exercita (`infrastructure/config`,
+`infrastructure/security`, os `*Config` de Rabbit/Kafka, a classe `*Application`) já ficam
+**excluídos** do cálculo de propósito (`<excludes>` no `pom.xml`), exatamente pra esse
+cenário sem Docker não travar o gate.
+
+### Relatório de execução (Allure) — os 4 serviços, servido pelo Docker
+
+Os 4 serviços já têm `allure-junit5` no `pom.xml` (cada `./mvnw test`/`verify` grava em
+`<service>/allure-results/`). Um container só no `docker-compose.yml` da raiz observa os 4
+`allure-results/` e gera/atualiza o relatório de cada um sozinho — **não precisa rodar
+`allure:serve` nem instalar o Allure CLI na mão**:
+
+```bash
+docker compose up -d allure
+```
+
+Depois de rodar os testes de um serviço (`./mvnw test` ou `verify`), espere uns 5s
+(intervalo de checagem) e acesse:
+
+| Serviço | URL do relatório |
+|---|---|
+| identity | http://localhost:5050/allure-docker-service/projects/identity/reports/latest/index.html |
+| scheduling | http://localhost:5050/allure-docker-service/projects/scheduling/reports/latest/index.html |
+| notification | http://localhost:5050/allure-docker-service/projects/notification/reports/latest/index.html |
+| history | http://localhost:5050/allure-docker-service/projects/history/reports/latest/index.html |
+
+Lista em JSON de todos os projetos detectados: http://localhost:5050/allure-docker-service/projects
+
+> Cada vez que você roda os testes de novo, o container detecta a mudança em
+> `allure-results/` e regenera o relatório sozinho — só dar F5 na página depois de uns
+> segundos. Os resultados **se acumulam entre execuções** (não são limpos sozinhos); pra um
+> relatório só da rodada mais recente, apague a pasta do serviço antes de rodar os testes de
+> novo: `rm -rf <service>/allure-results` (bash) ou
+> `Remove-Item -Recurse -Force <service>/allure-results` (PowerShell).
+
+Prefere rodar 100% local, sem esse container (só no `scheduling-service`, que também tem o
+plugin `allure-maven`)?
+
+```bash
+cd scheduling-service
+./mvnw allure:serve "-Dallure.results.directory=../allure-results"
+```
+
+> O parâmetro `-Dallure.results.directory=../allure-results` é necessário: o
+> `allure-junit5` grava em `allure-results/` na raiz do projeto, mas o plugin `allure-maven`
+> por padrão procura dentro de `target/` — sem esse parâmetro ele erra com
+> `Directory .../target/allure-results not found`.

@@ -239,6 +239,33 @@ services:
     environment:
       ADMINER_DEFAULT_SERVER: mysql-identity
 
+  # Serves the Allure report of all 4 services from their allure-results/ folders —
+  # you still need to run `./mvnw test` (or `verify`) in a service locally to produce/update
+  # its results, but you never run `allure:serve` by hand: this container watches all 4
+  # folders and regenerates automatically every few seconds. Reports:
+  #   http://localhost:5050/allure-docker-service/projects/identity/reports/latest/index.html
+  #   http://localhost:5050/allure-docker-service/projects/scheduling/reports/latest/index.html
+  #   http://localhost:5050/allure-docker-service/projects/notification/reports/latest/index.html
+  #   http://localhost:5050/allure-docker-service/projects/history/reports/latest/index.html
+  # `user: root` works around the image auto-creating non-default project folders as
+  # root:root, which its own non-root user then can't write reports into.
+  allure:
+    image: frankescobar/allure-docker-service:latest
+    container_name: allure-hospital
+    restart: unless-stopped
+    user: root
+    environment:
+      CHECK_RESULTS_EVERY_SECONDS: 5
+      KEEP_HISTORY: 1
+      KEEP_HISTORY_LATEST: 25
+    ports:
+      - "5050:5050"
+    volumes:
+      - ./identity-service/allure-results:/app/projects/identity/results
+      - ./scheduling-service/allure-results:/app/projects/scheduling/results
+      - ./notification-service/allure-results:/app/projects/notification/results
+      - ./history-service/allure-results:/app/projects/history/results
+
 volumes:
   mysql-identity-data:
   mysql-scheduling-data:
