@@ -1,287 +1,271 @@
 # Hospital Appointment System
 
-Backend of **four independent microservices** for hospital appointment scheduling, patient
-history, and automatic reminders, with role-based access control and asynchronous
-service-to-service communication.
+Backend de **4 microserviços independentes** para agendamento de consultas hospitalares,
+histórico de pacientes e lembretes automáticos, com controle de acesso por papel e comunicação
+assíncrona entre serviços.
 
-Built as a graduate (pós-graduação) project to demonstrate Clean Architecture, CQRS, event-driven
-integration between services, and stateless JWT security in a realistic multi-service backend.
-
-| Service | Repo (submodule) | Port | Responsibility |
-|---|---|---|---|
-| [`identity-service`](identity-service/README.md) | `biadevcosta/identity-service` | 8080 | Authentication, JWT (RS256) issuance, user management |
-| [`scheduling-service`](scheduling-service/README.md) | `biadevcosta/scheduling-service` | 8081 | Writes appointments (source of truth), publishes events |
-| [`notification-service`](notification-service/README.md) | `biadevcosta/notification-service` | 8082 | Consumes reminders, resolves the patient's contact, sends them |
-| [`history-service`](history-service/README.md) | `biadevcosta/history-service` | 8083 | Read side (CQRS): consumes events, serves history queries |
-
-Each service has its own README with endpoints, request/response examples, and how to run and test
-it in isolation. This document covers the system as a whole: architecture, business rules,
-communication between services, and how to run everything together.
-
-See [`arquitetura-sistemas.drawio`](arquitetura-sistemas.drawio) for the visual diagrams
-(component/data-flow view and an end-to-end walkthrough) — open it at [app.diagrams.net](https://app.diagrams.net).
-For a hands-on manual test session (Swagger + GraphiQL, copy-paste ready, PT-BR), see
-[`ROTEIRO-TESTES.md`](ROTEIRO-TESTES.md).
+Projeto de pós-graduação: Clean Architecture, CQRS, integração orientada a eventos e segurança
+JWT stateless num backend multi-serviço real.
 
 ---
 
-## 1. Architecture
+## 📎 Comece por aqui
 
-Every service follows **Clean Architecture** with the same three layers and the same dependency
-rule: dependencies point inward, never outward.
+> Antes de entrar em qualquer serviço, estes dois arquivos dão o panorama completo do sistema.
+
+<table>
+<tr>
+<td width="50%" valign="top">
+
+### 🗺️ [`arquitetura-sistemas.drawio`](arquitetura-sistemas.drawio)
+
+[![Abrir diagrama](https://img.shields.io/badge/📐_ABRIR-arquitetura--sistemas.drawio-2b6cb0?style=for-the-badge)](arquitetura-sistemas.drawio)
+
+Diagrama de **componentes e fluxo de dados** — os 4 serviços, os 2 brokers (RabbitMQ/Kafka),
+os 4 bancos e o sentido de cada seta. O fluxo end-to-end (login → agendamento → notificação →
+histórico) na prática está no [`guia-de-testes.md`](guia-de-testes.md), com requests e
+prints reais.
+
+Abra em **[app.diagrams.net](https://app.diagrams.net)** (File → Open from → Device).
+
+</td>
+<td width="50%" valign="top">
+
+### 🧪 [`guia-de-testes.md`](guia-de-testes.md)
+
+[![Abrir guia](https://img.shields.io/badge/▶️_ABRIR-guia--de--testes.md-2f855a?style=for-the-badge)](guia-de-testes.md)
+
+Como subir o sistema e testar na mão, passo a passo, do `docker compose up` até a consulta
+aparecer no histórico:
+- Requests prontos pra copiar e colar (Swagger + GraphiQL).
+- Resposta esperada em cada passo.
+- Cobre setup, login, cadastro de usuários, agendamento, e-mail simulado, histórico, edição/
+  cancelamento, consulta direta no banco e o relatório de testes (Allure).
+
+</td>
+</tr>
+</table>
+
+> O restante deste README explica **por que** o sistema é assim: regras de negócio, comunicação
+> entre serviços e as decisões por trás do diagrama.
+
+---
+
+| Serviço | Repositório (submódulo) | Porta | Responsabilidade |
+|---|---|---|---|
+| [`identity-service`](identity-service/README.md) | `biadevcosta/identity-service` | 8080 | Autenticação, emissão de JWT (RS256), gestão de usuários |
+| [`scheduling-service`](scheduling-service/README.md) | `biadevcosta/scheduling-service` | 8081 | Escreve consultas (fonte da verdade), publica eventos |
+| [`notification-service`](notification-service/README.md) | `biadevcosta/notification-service` | 8082 | Consome lembretes, resolve o contato do paciente, envia |
+| [`history-service`](history-service/README.md) | `biadevcosta/history-service` | 8083 | Lado de leitura (CQRS): consome eventos, serve consultas de histórico |
+
+Cada serviço tem seu próprio README, com endpoints, exemplos de request/response e como
+rodar/testar isoladamente. Este documento cobre o sistema como um todo.
+
+---
+
+## 1. Arquitetura
+
+Todo serviço segue **Clean Architecture**, três camadas, mesma regra de dependência: sempre de
+fora pra dentro.
 
 ```
 <service>/
-├── domain/            pure entities + business rules — no framework imports
-├── application/       use cases as plain classes (no framework annotations)
-│                       + ports (interfaces) that the domain/use cases depend on
-└── infrastructure/    everything concrete: GraphQL/REST adapters, persistence,
-                        messaging, security, @Configuration wiring
+├── domain/            entidades e regras de negócio — sem imports de framework
+├── application/       casos de uso (classes simples) + ports (interfaces)
+└── infrastructure/    adapters concretos: GraphQL/REST, persistência, mensageria,
+                        segurança, configuração (@Configuration)
 ```
 
-- `domain`: entities and invariants only. No Spring, no JPA/JDBC annotations, no HTTP/messaging types.
-- `application`: use cases as plain objects, wired with dependencies through the constructor. Ports
-  (interfaces) that a use case needs — a repository, a publisher, a token issuer — are **defined
-  here**, never in `infrastructure`.
-- `infrastructure`: implements every port with a concrete adapter (a JDBC repository, a Rabbit/Kafka
-  publisher, an HTTP client), exposes the API (GraphQL resolver or REST controller), and wires it
-  all together with `@Configuration` classes.
+- `domain`: entidades e invariantes. Sem Spring, sem anotações JPA/JDBC, sem tipos de
+  HTTP/mensageria.
+- `application`: casos de uso simples, dependências via construtor. Ports (interfaces) —
+  repositório, publisher, emissor de token — são definidas aqui, nunca em `infrastructure`.
+- `infrastructure`: implementa cada port com um adapter concreto (repositório JDBC, publisher
+  Rabbit/Kafka, cliente HTTP), expõe a API (resolver GraphQL / controller REST) e faz a fiação
+  com `@Configuration`.
 
-**Why this shape:** a use case's test never needs Spring, a real database, or a real broker — every
-collaborator is an interface a test can fake. Swapping an adapter (e.g. a different e-mail provider,
-a different message broker) never touches `domain` or `application`.
+Testar um caso de uso não exige Spring, banco real nem broker real — todo colaborador é uma
+interface substituível por fake. Trocar um adapter (outro provedor de e-mail, outro broker) não
+toca `domain` nem `application`.
 
-Stack: **Java 21, Spring Boot 4.1, Spring Data JDBC (no JPA/Hibernate), MySQL, Flyway, Spring for
-GraphQL, Spring Security (JWT RS256), RabbitMQ, Kafka.** Tests: JUnit 5 + Mockito + AssertJ (unit),
-Testcontainers (integration). Coverage gate: **80% line coverage (JaCoCo)** per service.
+Stack: **Java 21, Spring Boot 4.1, Spring Data JDBC (sem JPA/Hibernate), MySQL, Flyway, Spring
+for GraphQL, Spring Security (JWT RS256), RabbitMQ, Kafka.** Testes: JUnit 5 + Mockito + AssertJ
+(unitários), Testcontainers (integração). Gate de cobertura: **80% de linha (JaCoCo)** por
+serviço.
 
-Key system-wide properties:
+Decisões do sistema:
 
-- **CQRS:** `scheduling-service` writes; `history-service` serves reads from its own read model,
-  built asynchronously from events.
-- **Two message brokers, two different jobs:** RabbitMQ carries a one-off task (send this reminder);
-  Kafka carries an ordered, replayable event log (the history feed).
-- **Stateless JWT (RS256):** `identity-service` signs tokens with a private key; every other service
-  validates them locally with the matching public key. No shared session store, no API gateway,
-  no network call needed just to check if a token is valid.
-- **Database per service:** each service owns its schema; no service reads another service's
-  database directly.
-- **User data resolved on demand:** a service that needs a user's name/e-mail calls
-  `identity-service` over HTTP (through a port, with a local cache) instead of copying user data
-  into its own database.
+- **CQRS:** `scheduling-service` escreve; `history-service` lê do próprio read model, montado de
+  forma assíncrona a partir dos eventos.
+- **Dois brokers, dois papéis:** RabbitMQ carrega uma tarefa pontual (enviar este lembrete);
+  Kafka carrega um log de eventos ordenado e replayable (o feed de histórico).
+- **JWT stateless (RS256):** `identity-service` assina com chave privada; os demais validam
+  localmente com a chave pública correspondente — sem sessão compartilhada, sem gateway, sem
+  chamada de rede pra checar validade do token.
+- **Banco por serviço:** cada serviço é dono do próprio schema; nenhum lê o banco de outro
+  diretamente.
+- **Dados de usuário resolvidos sob demanda:** quem precisa de nome/e-mail chama
+  `identity-service` via HTTP (com cache local) em vez de copiar esse dado pro próprio banco.
 
 ---
 
-## 2. Business rules
+## 2. Regras de negócio
 
-### 2.1 Roles and permissions
+### 2.1 Papéis e permissões
 
-Three roles: `DOCTOR`, `NURSE`, `PATIENT` (plus `ADMIN`, internal to `identity-service`, used only
-to register users).
+Três papéis: `DOCTOR`, `NURSE`, `PATIENT` (mais `ADMIN`, interno ao `identity-service`, só pra
+cadastrar usuários).
 
-| Capability | DOCTOR | NURSE | PATIENT |
+| Capacidade | DOCTOR | NURSE | PATIENT |
 |---|:---:|:---:|:---:|
-| Create (register) an appointment | ✅ | ✅ | ❌ |
-| Edit an appointment | ✅ (owner only) | ❌ | ❌ |
-| Read appointment history | ✅ (any patient) | ✅ (any patient) | ✅ (own only) |
-| Read future appointments | ✅ (any patient) | ✅ (any patient) | ✅ (own only) |
+| Criar consulta | ✅ | ✅ | ❌ |
+| Editar consulta | ✅ (só o dono) | ❌ | ❌ |
+| Ler histórico | ✅ (qualquer paciente) | ✅ (qualquer paciente) | ✅ (só o próprio) |
+| Ler consultas futuras | ✅ (qualquer paciente) | ✅ (qualquer paciente) | ✅ (só o próprio) |
 
-| Operation | Allowed roles |
+| Operação | Papéis permitidos |
 |---|---|
 | `scheduleAppointment` (mutation) | `DOCTOR`, `NURSE` |
-| `editAppointment` (mutation) | `DOCTOR`, **and** must be the appointment's owner |
+| `editAppointment` (mutation) | `DOCTOR`, e precisa ser o dono da consulta |
 | `history` / `futureAppointments` (queries) | `DOCTOR`, `NURSE`, `PATIENT` |
 
-### 2.2 Appointment lifecycle
+### 2.2 Ciclo de vida da consulta
 
-- Status is an enum: `SCHEDULED`, `COMPLETED`, `CANCELLED`.
-- A newly created appointment starts as `SCHEDULED`.
-- **"Future appointment"** = status `SCHEDULED` **and** `scheduledAt` in the future.
-- **"History"** = all appointments of a patient, regardless of status.
+- Status: `SCHEDULED`, `COMPLETED`, `CANCELLED`.
+- Toda consulta nasce `SCHEDULED`.
+- **Consulta futura** = status `SCHEDULED` e `scheduledAt` no futuro.
+- **Histórico** = todas as consultas do paciente, qualquer status.
 
-### 2.3 Ownership rules
+### 2.3 Regras de posse
 
-- **Only the owner edits:** the appointment's doctor (`doctorId`) is its owner. Only that doctor may
-  edit it — enforced inside the domain/use case, not only by the role gate.
-- **A patient only sees their own data:** for a `PATIENT` caller, the `patientId` used to query
-  history/future appointments comes from the **authenticated token**, never from a client-supplied
-  argument. For `DOCTOR`/`NURSE`, the requested `patientId` argument is honored.
+- **Só o dono edita:** o médico da consulta (`doctorId`) é o dono. Só ele edita — validado no
+  domínio/caso de uso, não só pela role.
+- **Paciente só vê o próprio dado:** para um `PATIENT`, o `patientId` usado na consulta vem do
+  **token autenticado**, nunca de um argumento enviado pelo cliente. Para `DOCTOR`/`NURSE`, o
+  `patientId` do argumento é respeitado.
 
-### 2.4 Invariants (rejected with a domain exception)
+### 2.4 Invariantes (rejeitadas com exceção de domínio)
 
-- `scheduledAt` must be in the **future**, both at creation and at edit.
-- `patientId` and `doctorId` are required.
-- Status transitions only ever use a valid enum value.
+- `scheduledAt` precisa estar no **futuro**, na criação e na edição.
+- `patientId` e `doctorId` são obrigatórios.
+- Transição de status só aceita valor válido do enum.
 
-### 2.5 Where authorization lives
+### 2.5 Onde vive a autorização
 
-- **Coarse role gate** (`hasRole` / `hasAnyRole`) → on the adapter, via `@PreAuthorize` on the
-  GraphQL resolver / REST controller.
-- **Fine-grained rules** (ownership, "patient sees only their own") → inside the **use case**,
-  which receives the caller's identity (role, userId/patientId) as a plain constructor/method
-  parameter. The core never reads `SecurityContextHolder` directly.
+- **Checagem de papel** (`hasRole`/`hasAnyRole`) → no adapter, via `@PreAuthorize` no resolver
+  GraphQL / controller REST.
+- **Regra fina** (posse, "paciente só vê o próprio") → dentro do **caso de uso**, que recebe a
+  identidade do chamador (papel, userId/patientId) como parâmetro simples. O núcleo nunca lê
+  `SecurityContextHolder` diretamente.
 
-### 2.6 Messaging behavior
+### 2.6 Mensageria
 
-- In `scheduling-service`, on both **create** and **edit**, the order is always: (1) validate,
-  (2) **persist**, (3) **then** publish. Nothing is ever published before the appointment is saved.
-  - RabbitMQ — `AppointmentReminder` (carries only ids: `appointmentId`, `patientId`, `scheduledAt`).
-  - Kafka topic `appointment-events` — `AppointmentCreated` / `AppointmentUpdated` (ids + status;
-    partition key = `patientId`, so events for the same patient are strictly ordered).
-- `notification-service` consumes the reminder, resolves the patient's name/e-mail from
-  `identity-service` (cached), and sends it (delivery is currently a log line — a real provider is
-  a pluggable adapter, see its README).
-- `history-service` consumes `appointment-events` **idempotently** (a `processed_events` table
-  ignores an already-seen `eventId`, since Kafka may redeliver), builds/updates its read model, and
-  resolves user names from `identity-service` at query time (so it always shows the **current**
-  name, not a stale copy).
+- No `scheduling-service`, em criação e edição, a ordem é sempre: validar → **persistir** →
+  **então** publicar. Nada é publicado antes de salvar.
+  - RabbitMQ — `AppointmentReminder` (só ids: `appointmentId`, `patientId`, `scheduledAt`).
+  - Kafka, tópico `appointment-events` — `AppointmentCreated`/`AppointmentUpdated` (ids + status;
+    chave de partição = `patientId`, garantindo ordem por paciente).
+- `notification-service` consome o lembrete, resolve nome/e-mail do paciente no
+  `identity-service` (cache) e envia (hoje só loga; um provedor real é um adapter plugável).
+- `history-service` consome `appointment-events` de forma **idempotente** (tabela
+  `processed_events` ignora `eventId` repetido, já que o Kafka pode reentregar), atualiza o read
+  model, e resolve nomes no `identity-service` no momento da consulta (sempre o nome atual, nunca
+  uma cópia velha).
 
 ---
 
-## 3. Communication between services
+## 3. Comunicação entre serviços
 
-Rule: **client → service is synchronous (HTTP/GraphQL)**; **service → service is asynchronous
-(broker)** — the only exception is the on-demand user lookup to `identity-service`, which is a
-synchronous, cached HTTP call on a non-critical path.
+Regra: **cliente → serviço é síncrono** (HTTP/GraphQL); **serviço → serviço é assíncrono**
+(broker) — única exceção é a busca de dados de usuário no `identity-service`, síncrona e
+cacheada, fora do caminho crítico.
 
-| From → To | Type | Mechanism | Payload |
+| De → Para | Tipo | Mecanismo | Payload |
 |---|---|---|---|
-| Client → Identity | sync | HTTP REST | credentials → JWT; user registration |
-| Client → Scheduling | sync | GraphQL + JWT | schedule / edit mutation |
-| Client → History | sync | GraphQL + JWT | history / future-appointments query |
-| Scheduling → Notification | async | RabbitMQ `reminder.queue` | reminder (ids only) |
-| Scheduling → History | async | Kafka `appointment-events` | appointment created/updated (ids + status) |
-| Notification → Identity | sync (cached) | HTTP | patient name/e-mail |
-| History → Identity | sync (cached) | HTTP | user name resolution |
+| Cliente → Identity | síncrono | HTTP REST | credenciais → JWT; cadastro de usuário |
+| Cliente → Scheduling | síncrono | GraphQL + JWT | mutation de agendar/editar |
+| Cliente → History | síncrono | GraphQL + JWT | query de histórico/futuras |
+| Scheduling → Notification | assíncrono | RabbitMQ `reminder.queue` | lembrete (só ids) |
+| Scheduling → History | assíncrono | Kafka `appointment-events` | consulta criada/atualizada (ids + status) |
+| Notification → Identity | síncrono (cache) | HTTP | nome/e-mail do paciente |
+| History → Identity | síncrono (cache) | HTTP | resolução de nome de usuário |
 
-### Data per service
+### Banco por serviço
 
-| Database | Owner | Tables |
+| Banco | Dono | Tabelas |
 |---|---|---|
 | `identity_db` | identity-service | `users`, `refresh_tokens` |
 | `scheduling_db` | scheduling-service | `appointments` |
-| `notification_db` | notification-service | `processed_reminders` (idempotency only) |
+| `notification_db` | notification-service | `processed_reminders` (idempotência) |
 | `history_db` | history-service | `appointment_history`, `processed_events` |
 
 ### Brokers
 
-| Broker | Name | Flow | Semantics |
+| Broker | Nome | Fluxo | Semântica |
 |---|---|---|---|
-| RabbitMQ | `reminder.queue` (+ `reminder.dlq`) | scheduling → notification | one-off task, retried 3× then dead-lettered |
-| Kafka | `appointment-events` (key = `patientId`) | scheduling → history | ordered per patient, replayable, consumer is idempotent |
+| RabbitMQ | `reminder.queue` (+ `reminder.dlq`) | scheduling → notification | tarefa pontual, 3 tentativas e depois dead-letter |
+| Kafka | `appointment-events` (chave = `patientId`) | scheduling → history | ordenado por paciente, replayable, consumidor idempotente |
 
 ---
 
-## 4. Security — JWT signed with RS256
+## 4. Segurança — JWT assinado com RS256
 
-`identity-service` is the only service that can **issue** a token; every other service can only
-**verify** one. This is possible because RS256 is an asymmetric signature: a **private key**
-produces a signature that only the matching **public key** can verify, and the public key alone is
-useless for forging a new signature.
+Só o `identity-service` **emite** token; os demais só **verificam**. Funciona porque RS256 é
+assinatura assimétrica: a **chave privada** assina, e só a **chave pública** correspondente
+verifica — a pública sozinha não serve pra forjar assinatura.
 
-- `identity-service` holds `private.pem` and signs every access token with it after a successful
-  login.
-- `scheduling-service` and `history-service` hold a copy of `public.pem` and validate the token's
-  signature **locally**, with no network call back to `identity-service` — keeping the write and
-  read paths fast and decoupled. `identity-service` is only ever called synchronously to fetch a
-  user's profile (name/e-mail), never to ask "is this token valid?".
+- `identity-service` guarda `private.pem` e assina cada access token após login.
+- `scheduling-service` e `history-service` guardam uma cópia de `public.pem` e validam a
+  assinatura **localmente**, sem chamada de rede de volta ao `identity-service` — escrita e
+  leitura ficam rápidas e desacopladas. `identity-service` só é chamado de forma síncrona pra
+  buscar perfil (nome/e-mail), nunca pra perguntar "esse token é válido?".
 
-Token claims: `sub` (userId), `role`, `patientId` (only for patient users), plus `iss`, `aud`,
+Claims do token: `sub` (userId), `role`, `patientId` (só para pacientes), mais `iss`, `aud`,
 `iat`, `exp`.
 
-Generating the key pair (done once, `private.pem` is git-ignored everywhere):
+Gerar o par de chaves (uma vez só; `private.pem` é git-ignored em todo lugar):
 
 ```bash
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out keys/private.pem
 openssl rsa -in keys/private.pem -pubout -out keys/public.pem
 ```
 
-`public.pem` is copied into every service's `src/main/resources/`; `private.pem` lives only in
+`public.pem` é copiada pro `src/main/resources/` de cada serviço; `private.pem` fica só no
 `identity-service`.
 
 ---
 
-## 5. Repository layout
+## 5. Layout do repositório
 
-Each of the four services is its own Git repository, wired into this one as a **Git submodule**
-(`github.com/biadevcosta/<service>`), with its own `Dockerfile`, `pom.xml`, tests, and README.
+Cada um dos 4 serviços é um repositório Git próprio, ligado a este como **submódulo**
+(`github.com/biadevcosta/<service>`), com `Dockerfile`, `pom.xml`, testes e README próprios.
 
 ```
 hospital-system/
-├── docker-compose.yml          # runs all 4 services + their infra together
-├── arquitetura-sistemas.drawio # architecture + end-to-end flow diagrams
-├── identity-service/           # submodule
-├── scheduling-service/         # submodule
-├── notification-service/       # submodule
-└── history-service/            # submodule
+├── docker-compose.yml          # sobe os 4 serviços + infra juntos
+├── arquitetura-sistemas.drawio # diagrama de componentes e fluxo de dados
+├── identity-service/           # submódulo
+├── scheduling-service/         # submódulo
+├── notification-service/       # submódulo
+└── history-service/            # submódulo
 ```
 
 ---
 
-## 6. How to run the whole system
+## 6. Como testar
 
-The root `docker-compose.yml` starts all four services, one MySQL per service, a shared RabbitMQ,
-and a shared Kafka, on a single Docker network:
-
-```bash
-git clone --recurse-submodules <this-repo-url>
-cd hospital-system
-
-# generate the RSA key pair once, then copy the public key into every service
-openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out keys/private.pem
-openssl rsa -in keys/private.pem -pubout -out keys/public.pem
-cp keys/private.pem identity-service/src/main/resources/private.pem
-cp keys/public.pem  identity-service/src/main/resources/public.pem
-cp keys/public.pem  scheduling-service/src/main/resources/public.pem
-cp keys/public.pem  history-service/src/main/resources/public.pem
-
-docker compose up --build -d
-docker compose logs -f identity scheduling notification history   # follow startup
-```
-
-| Endpoint | URL |
-|---|---|
-| identity-service (REST + Swagger) | http://localhost:8080/swagger-ui.html |
-| scheduling-service (GraphiQL) | http://localhost:8085/graphiql |
-| history-service (GraphiQL) | http://localhost:8083/graphiql |
-| notification-service | no API — consumer only, check `docker compose logs notification` |
-| RabbitMQ management UI | http://localhost:15672 (guest/guest) |
-| Kafka UI | http://localhost:8084 |
-| Adminer (all 4 databases) | http://localhost:8090 (root/root) |
-
-A seeded admin (`admin@hospital.local` / `admin12345`) is created on `identity-service` startup, so
-`POST /users` can be used immediately to register a doctor and a patient.
-
-**Exercising the full flow** (see the "end-to-end flow" page in the `.drawio` diagram for the
-illustrated version):
-
-1. `identity` → log in as admin → register a `DOCTOR` and a `PATIENT` → log in as the doctor and
-   keep the access token.
-2. `scheduling` → `scheduleAppointment` with that token → persists to `scheduling_db`, publishes to
-   RabbitMQ and Kafka.
-3. `notification` → consumes the reminder, resolves the patient's name/e-mail from `identity`, logs
-   the simulated e-mail.
-4. `history` → consumes the Kafka event, then `history(patientId)` / `futureAppointments(patientId)`
-   return the appointment.
-
-To stop everything: `docker compose down` (add `-v` to also wipe the MySQL volumes).
-
-## 7. How to test
-
-Each service is independently testable — see its README for details. In every service:
+Cada serviço é testável isoladamente — detalhes no README de cada um:
 
 ```bash
 cd <service>
-./mvnw test       # unit tests only — no Docker required
-./mvnw verify      # + integration test (Testcontainers) + JaCoCo 80% line-coverage gate
+./mvnw test       # só testes unitários — sem Docker
+./mvnw verify     # + integração (Testcontainers) + gate JaCoCo 80%
 ```
 
-Integration tests self-skip (instead of failing) when no Docker daemon is reachable, so `./mvnw
-verify` always completes. Coverage report: `target/site/jacoco/index.html` in each service.
+Sem Docker disponível, os testes de integração se auto-pulam em vez de falhar — `./mvnw verify`
+sempre completa. Relatório de cobertura: `target/site/jacoco/index.html` em cada serviço.
 
-Each service also ships an OpenAPI/GraphiQL explorer (see its README) and, for `identity-service`
-and `scheduling-service`, an importable Insomnia collection.
+Cada serviço também expõe um explorador OpenAPI/GraphiQL (ver seu README); `identity-service` e
+`scheduling-service` incluem ainda uma coleção Insomnia importável.
 
-For a full manual walkthrough — creating users, scheduling an appointment, checking the
-reminder and the history — with exact requests/variables and expected responses, see
-[`ROTEIRO-TESTES.md`](ROTEIRO-TESTES.md).
+Guia manual completo, com requests e respostas esperadas: [`guia-de-testes.md`](guia-de-testes.md).

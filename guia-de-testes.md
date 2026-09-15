@@ -1,12 +1,11 @@
-# Roteiro E2E — teste manual
+# Guia de testes
 
-Passo a passo pra testar o sistema na mão — Swagger (identity) + GraphiQL (scheduling e
-history) — do jeito que o Docker sobe do zero até a consulta aparecer no histórico. Cada
-passo mostra o que você deve receber de volta, então dá pra conferir se deu certo antes de
-seguir pro próximo.
+Passo a passo pra subir o sistema e testar na mão — Swagger (identity) + GraphiQL (scheduling e
+history) — do zero até a consulta aparecer no histórico. Cada passo mostra o que você deve
+receber de volta, então dá pra conferir se deu certo antes de seguir pro próximo.
 
 > Veja também: [`README.md`](README.md) (arquitetura, regras de negócio) e
-> [`arquitetura-sistemas.drawio`](arquitetura-sistemas.drawio) (diagramas visuais).
+> [`arquitetura-sistemas.drawio`](arquitetura-sistemas.drawio) (diagrama de componentes).
 
 ## Portas (com Docker up)
 
@@ -19,7 +18,7 @@ seguir pro próximo.
 | RabbitMQ (painel) | http://localhost:15672 (guest/guest) |
 | Kafka UI | http://localhost:8084 |
 | Adminer | http://localhost:8090 (root/root) |
-| Allure (relatório de testes) | http://localhost:5050 |
+| Allure (relatório de testes) | ver URL de cada serviço no [passo 10](#10-ver-o-relatório-de-testes-allure) |
 
 ## Quem precisa de qual token
 
@@ -40,16 +39,26 @@ correspondente.
 
 Token: nenhum.
 
-As chaves RSA já estão geradas e copiadas pros 3 serviços — não precisa mexer nisso.
-
 ```bash
+git clone --recurse-submodules <url-deste-repo>
 cd hospital-system
+
+# gera o par de chaves RSA uma vez, copia a pública pra cada serviço
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out keys/private.pem
+openssl rsa -in keys/private.pem -pubout -out keys/public.pem
+cp keys/private.pem identity-service/src/main/resources/private.pem
+cp keys/public.pem  identity-service/src/main/resources/public.pem
+cp keys/public.pem  scheduling-service/src/main/resources/public.pem
+cp keys/public.pem  history-service/src/main/resources/public.pem
+
 docker compose up --build -d
 docker compose logs -f identity scheduling notification history
 ```
 
 Quer começar 100% do zero (apagar os bancos também)? Rode `docker compose down -v` antes
-do `up`.
+do `up`. Pra parar tudo no final: `docker compose down`.
+
+![Passo 0 — containers no ar](evidencias/00-subir-sistema.png)
 
 ## 1. Login como admin
 
@@ -69,12 +78,17 @@ Swagger: `localhost:8080/swagger-ui.html` → `POST /auth/login`
 
 **Guarde:** o `accessToken` da resposta → chame de **token ADMIN** (vale 1h).
 
+![Passo 1 — login admin](evidencias/01-login-admin.png)
+
 ## 2. Criar um DOCTOR
 
 Token: ADMIN.
 
-No Swagger, clique em **Authorize** e cole o token ADMIN do passo 1. Depois:
-`POST /users`
+No Swagger, clique em **Authorize** e cole o token ADMIN do passo 1.
+
+![Passo 2 — Authorize no Swagger com o token ADMIN](evidencias/02-authorize-swagger.png)
+
+Depois: `POST /users`
 
 ```json
 {
@@ -88,6 +102,8 @@ No Swagger, clique em **Authorize** e cole o token ADMIN do passo 1. Depois:
 ```
 
 **Guarde:** o `id` da resposta → chame de **doctorId**.
+
+![Passo 2 — criar doctor](evidencias/02-criar-doctor.png)
 
 ## 3. Criar um PATIENT
 
@@ -105,6 +121,8 @@ Token: ADMIN (mesmo do passo 1, ainda no ar).
 ```
 
 **Guarde:** o `id` da resposta → chame de **patientId**.
+
+![Passo 3 — criar patient](evidencias/03-criar-patient.png)
 
 ## 4. Login como o DOCTOR
 
@@ -124,6 +142,8 @@ Token: nenhum.
 
 **Guarde:** o `accessToken` → chame de **token DOCTOR** (vale 1h).
 
+![Passo 4 — login doctor](evidencias/04-login-doctor.png)
+
 ## 5. Agendar a consulta
 
 Token: DOCTOR.
@@ -134,6 +154,8 @@ No painel Headers:
 ```json
 { "Authorization": "Bearer <token DOCTOR>" }
 ```
+
+![Passo 5 — token colado no painel Headers do GraphiQL](evidencias/05-colando-token-graphiql.png)
 
 Query:
 
@@ -167,6 +189,8 @@ Resposta esperada:
 
 **Guarde:** o `id` → chame de **appointmentId**.
 
+![Passo 5 — agendar consulta](evidencias/05-agendar-consulta.png)
+
 ## 6. Conferir o e-mail simulado
 
 Token: nenhum.
@@ -182,8 +206,12 @@ Simulated e-mail sent to Paciente Teste <paciente.teste@hospital.local>
  — subject: "Lembrete: sua consulta em 01/11/2026 às 10:00"
 ```
 
+![Passo 6 — e-mail simulado no log](evidencias/06-email-simulado.png)
+
 Bônus: em `localhost:15672` (guest/guest), a fila `reminder.queue` deve estar de volta em
 zero — foi consumida.
+
+![Passo 6 — fila reminder.queue vazia no RabbitMQ](evidencias/06-fila-vazia-rabbitmq.png)
 
 ## 7. Conferir o histórico
 
@@ -216,6 +244,8 @@ Resposta esperada:
   "status": "SCHEDULED" }] } }
 ```
 
+![Passo 7 — histórico](evidencias/07-historico.png)
+
 ## 8. Editar / cancelar (opcional)
 
 Token: DOCTOR dono do agendamento (mesmo token do passo 4).
@@ -238,6 +268,21 @@ Variables — `appointmentId` do passo 5:
   }
 }
 ```
+
+![Passo 8 — editar/cancelar](evidencias/08-editar-cancelar.png)
+
+Bônus: tanto o agendamento (passo 5) quanto essa edição publicam no tópico Kafka
+`appointment-events` (`AppointmentCreated` e `AppointmentUpdated` — é esse evento que o
+`history-service` consome pra montar o histórico do passo 7). Pra ver as duas mensagens já
+publicadas, abra o Kafka UI em `localhost:8084` → **Topics** → `appointment-events` →
+**Messages**.
+
+![Passo 8 — mensagens publicadas no Kafka](evidencias/08-kafka-mensagens.png)
+
+Bônus: refaça a query do passo 7 (mesmas variables) — o `status` deve vir `CANCELLED` agora,
+prova de que o `history-service` consumiu o `AppointmentUpdated` do Kafka.
+
+![Passo 8 — histórico já refletindo o cancelamento](evidencias/08-historico-pos-cancelamento.png)
 
 ## 9. Ver direto no banco (opcional)
 
@@ -271,54 +316,26 @@ Também dá pra consultar direto pela linha de comando, sem abrir o navegador:
 docker exec mysql-history mysql -uroot -proot history_db -e "SELECT * FROM appointment_history;"
 ```
 
-## 10. Suíte automatizada: cobertura (JaCoCo) e relatório (Allure)
+![Passo 9 — consulta via linha de comando](evidencias/09-banco-cli.png)
 
-Token: nenhum — isso não usa o Docker Compose do sistema nem a API, é Maven rodando local
-em cada serviço (o Testcontainers sobe seus próprios MySQL/RabbitMQ/Kafka descartáveis só
-pros testes de integração).
+![Passo 9 — os 4 bancos abertos no Adminer](evidencias/09-banco-adminer.png)
 
-### Rodar os testes
+## 10. Ver o relatório de testes (Allure)
+
+Token: nenhum.
+
+O container do Allure já subiu junto com o resto lá no passo 0 (`docker compose up --build
+-d`) — ele fica de olho nos resultados de teste dos 4 serviços e monta o relatório sozinho,
+sem precisar instalar nada.
+
+Rode os testes de um serviço:
 
 ```bash
 cd <service>     # identity-service | scheduling-service | notification-service | history-service
-./mvnw verify    # unit + integração + gate de cobertura
+./mvnw verify
 ```
 
-> Nesta máquina o Maven não enxerga o Docker Desktop pelo named pipe do WSL — os testes de
-> integração (`@SpringBootTest` + Testcontainers) se auto-pulam em vez de falhar (esperado,
-> já documentado no README de cada serviço). O build continua passando, só não soma a
-> cobertura extra que esses testes dariam.
-
-### Cobertura (JaCoCo) — o gate real é 80%, não 100%
-
-O `pom.xml` de cada serviço trava o build se a cobertura de **linha** cair abaixo de
-**80%** (`jacoco-maven-plugin`, goal `check`, fase `verify`) — apesar do nome comum ser
-"cobertura total", o número configurado é 80%, não 100%. Abra o relatório:
-
-```
-target/site/jacoco/index.html
-```
-
-No `scheduling-service`, rodando agora mesmo (com os testes de integração pulados), a
-cobertura real ficou em **99% das instruções / 168 de 169 linhas** — bem acima do gate —
-porque os pacotes que só a integração exercita (`infrastructure/config`,
-`infrastructure/security`, os `*Config` de Rabbit/Kafka, a classe `*Application`) já ficam
-**excluídos** do cálculo de propósito (`<excludes>` no `pom.xml`), exatamente pra esse
-cenário sem Docker não travar o gate.
-
-### Relatório de execução (Allure) — os 4 serviços, servido pelo Docker
-
-Os 4 serviços já têm `allure-junit5` no `pom.xml` (cada `./mvnw test`/`verify` grava em
-`<service>/allure-results/`). Um container só no `docker-compose.yml` da raiz observa os 4
-`allure-results/` e gera/atualiza o relatório de cada um sozinho — **não precisa rodar
-`allure:serve` nem instalar o Allure CLI na mão**:
-
-```bash
-docker compose up -d allure
-```
-
-Depois de rodar os testes de um serviço (`./mvnw test` ou `verify`), espere uns 5s
-(intervalo de checagem) e acesse:
+Espere uns 5s (intervalo de checagem do container) e abra o relatório:
 
 | Serviço | URL do relatório |
 |---|---|
@@ -327,24 +344,11 @@ Depois de rodar os testes de um serviço (`./mvnw test` ou `verify`), espere uns
 | notification | http://localhost:5050/allure-docker-service/projects/notification/reports/latest/index.html |
 | history | http://localhost:5050/allure-docker-service/projects/history/reports/latest/index.html |
 
-Lista em JSON de todos os projetos detectados: http://localhost:5050/allure-docker-service/projects
+Resultado esperado: página lista os testes do serviço, com o total passando em verde.
 
-> Cada vez que você roda os testes de novo, o container detecta a mudança em
-> `allure-results/` e regenera o relatório sozinho — só dar F5 na página depois de uns
-> segundos. Os resultados **se acumulam entre execuções** (não são limpos sozinhos); pra um
-> relatório só da rodada mais recente, apague a pasta do serviço antes de rodar os testes de
-> novo: `rm -rf <service>/allure-results` (bash) ou
+![Passo 10 — relatório Allure](evidencias/10-allure.png)
+
+> Rodou os testes de novo? O container detecta sozinho e regenera o relatório — só dar F5.
+> Os resultados se acumulam entre execuções; pra ver só a rodada mais recente, apague a
+> pasta antes: `rm -rf <service>/allure-results` (bash) ou
 > `Remove-Item -Recurse -Force <service>/allure-results` (PowerShell).
-
-Prefere rodar 100% local, sem esse container (só no `scheduling-service`, que também tem o
-plugin `allure-maven`)?
-
-```bash
-cd scheduling-service
-./mvnw allure:serve "-Dallure.results.directory=../allure-results"
-```
-
-> O parâmetro `-Dallure.results.directory=../allure-results` é necessário: o
-> `allure-junit5` grava em `allure-results/` na raiz do projeto, mas o plugin `allure-maven`
-> por padrão procura dentro de `target/` — sem esse parâmetro ele erra com
-> `Directory .../target/allure-results not found`.
